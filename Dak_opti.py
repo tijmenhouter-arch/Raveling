@@ -1520,12 +1520,7 @@ def main():
             key="extra_column",
         )
 
-        if extra_column:
-            st.caption(
-                "Op 3.025 mm ondersteunt deze kolom "
-                "de aansluiting B1–B3."
-            )
-    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column, snow,rain,maintenance_area,maintenance_point)
+    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point)
     st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
