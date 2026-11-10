@@ -622,7 +622,9 @@ def optimize(p):
     model berekende balken moeten slagen voor de twee geïmplementeerde toetsen.
     """
     approved = []
-    for section in SECTIONS:
+    candidates = tuple(dict.fromkeys((*SECTIONS, p.joist)))
+
+    for section in candidates:
         for spacing in SPACINGS:
             trial = replace(p, joist=section, spacing=spacing)
             result = analyze(trial, keep_details=False)
@@ -1451,8 +1453,49 @@ def show_calculation_method(p, result):
 
 # ==================== EENVOUDIGE INTERFACE ====================
 def choose_section(label, default, key):
-    return st.selectbox(label, SECTIONS, index=SECTIONS.index(default),
-                        format_func=section_text, key=key)
+    choice = st.selectbox(
+        label,
+        [*SECTIONS, "Handmatig"],
+        index=SECTIONS.index(default),
+        format_func=lambda value: (
+            value
+            if isinstance(value, str)
+            else section_text(value)
+        ),
+        key=key,
+    )
+
+    if choice != "Handmatig":
+        return choice
+
+    # Handmatige maten behouden bij wisselen naar een standaardprofiel.
+    previous = st.session_state.get(
+        f"{key}_manual_values", default
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        width = st.number_input(
+            "Breedte b [mm]",
+            min_value=1,
+            value=int(previous[0]),
+            step=1,
+            key=f"{key}_width",
+        )
+
+    with right:
+        height = st.number_input(
+            "Hoogte h [mm]",
+            min_value=1,
+            value=int(previous[1]),
+            step=1,
+            key=f"{key}_height",
+        )
+
+    section = (int(width), int(height))
+    st.session_state[f"{key}_manual_values"] = section
+    return section
 
 
 def main():
@@ -1482,7 +1525,7 @@ def main():
                 "Op 3.025 mm ondersteunt deze kolom "
                 "de aansluiting B1–B3."
             )
-    p=Parameters(strength,sheet,spacing,joist,edge,header,bearing_left,bearing_right, extra_column, column_x, snow,rain,maintenance_area,maintenance_point)
+    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column, snow,rain,maintenance_area,maintenance_point)
     st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
