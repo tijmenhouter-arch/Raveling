@@ -71,8 +71,8 @@ class Parameters:
     joist: tuple[int, int] = (63, 195)
     edge: tuple[int, int] = (75, 245)
     header: tuple[int, int] = (63, 195)
-    bearing_left: int = 150
-    bearing_right: int = 150
+    bearing_left: int = 120
+    bearing_right: int = 120
     extra_column: bool = False
     column_x: float = 3025.0
     snow: float = 0.56
@@ -1191,11 +1191,22 @@ def show_calculation_method(p, result):
         "dit wordt niet opnieuw toegevoegd."
     )
     st.write(
-        f"Totaal permanent: "
-        f"**{load_total(c['G']) / 1000:.4f} kN**. "
-        f"Totaal variabele lijn-/puntreacties: "
-        f"**{load_total(c['Q']) / 1000:.4f} kN**."
+        f"Totaal permanent op deze balk: "
+        f"**{load_total(c['G']) / 1000:.4f} kN**."
     )
+
+    if c["point_case"]:
+        st.write(
+            f"Variabele belasting: één onderhoudspuntlast "
+            f"van **{p.maintenance_point:.4f} kN**. "
+            "Deze wordt afzonderlijk als lokale envelop "
+            "verwerkt, zonder gelijktijdige onderhoudsvlaklast."
+        )
+    else:
+        st.write(
+            f"Totaal variabel in dit scenario: "
+            f"**{load_total(c['Q']) / 1000:.4f} kN**."
+        )
 
     st.markdown("### 4. Oplegreacties en momenten")
     st.latex(
@@ -1426,16 +1437,16 @@ def show_calculation_method(p, result):
         "De hoofd-BGT bevat 0,01% numerieke toeslag; "
         "de kolom-puntlastenvelop 0,1%."
     )
-    st.warning(
-        "Dit is een deelcontrole volgens het voorlopige "
-        "referentieprofiel. Normcombinaties en kmod/psi2 "
-        "per belastingtype zijn nog niet definitief. "
-        "Afschuiving, stabiliteit, verbindingen/verankering, "
-        "draagvlakken van het opstandframe, kolom/fundering, "
-        "aanvullende plafondcriteria en wateraccumulatie "
-        "zijn niet getoetst. Meevervorming van dragende "
-        "balken en verbindingsslip zijn niet opgeteld."
-    )
+    #st.warning(
+        #"Dit is een deelcontrole volgens het voorlopige "
+       # "referentieprofiel. Normcombinaties en kmod/psi2 "
+        #"per belastingtype zijn nog niet definitief. "
+        #"Afschuiving, stabiliteit, verbindingen/verankering, "
+        #"draagvlakken van het opstandframe, kolom/fundering, "
+        #"aanvullende plafondcriteria en wateraccumulatie "
+        #"zijn niet getoetst. Meevervorming van dragende "
+        #"balken en verbindingsslip zijn niet opgeteld."
+    #)
 
 
 # ==================== EENVOUDIGE INTERFACE ====================
@@ -1460,23 +1471,10 @@ def main():
             rain = st.number_input("Regenwater [kN/m²]", min_value=0.0,value=1.0,step=0.05,key="rain",)
             maintenance_area = st.number_input("Onderhoud vlaklast [kN/m²]",min_value=0.0,value=1.0,step=0.05,key="maintenance_area",)
             maintenance_point = st.number_input("Onderhoud puntlast [kN]",min_value=0.0,value=1.5,step=0.1,key="maintenance_point",)
-        with st.expander("Opleglengtes",expanded=False):
-            bearing_left=st.number_input("Muur / kolom links [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_left")
-            bearing_right=st.number_input("Muur rechts [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_right")
         extra_column = st.toggle(
-            "Extra kolom onder B1",
+            "Extra kolom onder aansluiting B1–B3",
             value=False,
             key="extra_column",
-        )
-
-        column_x = st.number_input(
-            "Kolom vanaf linker binnenzijde [mm]",
-            min_value=1,
-            max_value=5479,
-            value=3025,
-            step=10,
-            disabled=not extra_column,
-            key="column_x",
         )
 
         if extra_column:
