@@ -202,12 +202,6 @@ def draw_support_schemes(p: Parameters):
 
 
 # ==================== STREAMLIT INTERFACE ====================
-
-"""Start met: python -m streamlit run app.py
-
-Interface, invoer, tekeningen en toekomstige berekeningen in dit bestand.
-Startbestand voor Streamlit Community Cloud: app.py.
-"""
 import json
 from dataclasses import asdict
 
@@ -230,8 +224,7 @@ def distance_input(label, value, key):
 
 with st.sidebar:
     st.header("Ontwerpparameters")
-    st.caption("Houtsoort: vuren")
-    strength = st.selectbox("Sterkteklasse", ["C24", "C18"], key="strength")
+    strength = st.selectbox("Sterkteklasse Vuurhout", ["C24", "C18"], key="strength")
     sheet = st.selectbox("Underlayment [mm]", [18, 22], key="sheet")
     st.subheader("Dwarsbalken en raveling")
     spacing = st.slider("Beoogde maximale h.o.h. [mm]", 300, 750, 600, 25, key="spacing")
@@ -241,28 +234,91 @@ with st.sidebar:
     main_section = section_input("B1 · bovenste lange", (75, 245), "main_section")
     upper_section = section_input("B2 · kleine bovenste lange", (75, 245), "upper_section")
     left_section = section_input("B3 · kleine linker", (63, 195), "left_section")
-    st.caption("Voorlopige handelsmaten; leverbare combinaties en werkelijke maten afstemmen.")
-    with st.expander("Oplegasafstanden [mm]", expanded=True):
-        st.caption("Hart ondersteuning → hart ondersteuning. Standaard voorlopig gelijk aan binnenmaat.")
-        jm = distance_input("Dwarsbalk hoofddeel", 2824, "span_joist_main")
-        je = distance_input("Dwarsbalk opbouw", 1220, "span_joist_extension")
-        b1 = distance_input("B1 · muur → muur", 5480, "span_upper_main")
-        b2 = distance_input("B2 · kolom → muur", 2455, "span_upper_extension")
-        b3 = distance_input("B3 · balkschoen → kolom", 1220, "span_left_extension")
-        shoe = distance_input("a · linker oplegas B1 → balkschoen", 3025, "shoe_position")
-    goal = st.selectbox("Optimalisatiedoel", ["Minimaal houtvolume", "Minimale balkhoogte"], key="goal")
+    with st.expander("Opleggingen en overspanningen [mm]", expanded=True):
+        bearing_left = st.number_input(
+            "Opleglengte links [mm]",min_value=1,value=150,step=10,key="bearing_left",)
+        bearing_right = st.number_input(
+            "Opleglengte rechts [mm]",
+            min_value=1,
+            value=150,
+            step=10,
+            key="bearing_right",
+        )
+
+        # B1 en B2: fysieke oplegging op muur / kolom.
+        b1_clear = distance_input(
+            "B1 · vrije binnenmaat", g.main_width, "b1_clear"
+        )
+        b2_clear = distance_input(
+            "B2 · vrije binnenmaat", g.extension_width, "b2_clear"
+        )
+
+        b1 = b1_clear + bearing_left / 2 + bearing_right / 2
+        b2 = b2_clear + bearing_left / 2 + bearing_right / 2
+
+        st.write(f"Oplegasafstand B1: **{b1:g} mm**")
+        st.write(f"Oplegasafstand B2: **{b2:g} mm**")
+
+        # Verbindingen met balkschoenen: voorlopig afzonderlijke invoer.
+        jm = distance_input(
+            "Dwarsbalk hoofddeel · oplegasafstand",
+            2824,
+            "span_joist_main",
+        )
+        je = distance_input(
+            "Dwarsbalk opbouw · oplegasafstand",
+            1220,
+            "span_joist_extension",
+        )
+        b3_clear = distance_input(
+            "B3 · vrije binnenmaat balkschoenzijde → kolom",
+            g.extension_depth,
+            "b3_clear",
+        )
+
+        # Dezelfde kolom als bij de linker oplegging van B2.
+        bearing_column = bearing_left
+
+        shoe_axis_offset = st.number_input(
+            "B3 · afstand aansluitvlak → oplegas balkschoen [mm]",
+            min_value=0,
+            value=0,
+            step=1,
+            key="b3_shoe_axis_offset",
+            help=(
+                "Voorlopig 0: oplegas op het aansluitvlak. "
+                "Later afstemmen op het aansluitdetail."
+            ),
+        )
+
+        b3 = (
+            b3_clear
+            + bearing_column / 2
+            + shoe_axis_offset
+        )
+
+        st.write(f"Oplegasafstand B3: **{b3:g} mm**")
+
+        shoe_from_inner_face = distance_input(
+            "Balkschoenpositie vanaf binnenzijde linker muur B1",
+            g.extension_x,
+            "shoe_from_inner_face",
+        )
+        shoe = shoe_from_inner_face + bearing_left / 2
+
+        st.caption(
+            f"Balkschoenpositie vanaf linker oplegas B1: {shoe:g} mm."
+        )
 
 p = Parameters(strength_class=strength, sheet_mm=sheet, spacing_mm=spacing,
                joist_section=joist, main_section=main_section,
                upper_section=upper_section, left_section=left_section,
-               trimmer_section=trimmer, goal=goal,
+               trimmer_section=trimmer,
                spans=Spans(jm, je, b1, b2, b3, shoe),
                **st.session_state.get("project_loads", {}))
 
 st.title("Optimalisatie raveling Schinkel")
 st.caption("App-opzet · dwarsbalken en raveling → oplegreacties → randbalken")
-st.info("UGT, BGT, eigen gewicht, lastcombinaties en optimalisatie zijn nog niet geïmplementeerd. "
-        "Gekozen doorsneden zijn invoer; er is nog geen uitspraak over geschiktheid.")
 errors = validate(p)
 for error in errors:
     st.error(error)
