@@ -863,6 +863,132 @@ def method_case(p, result, row, case):
         bgt=u / row["limit"],
     )
 
+def draw_beam_minimap(p, model, selected):
+    """Ligging uit hetzelfde balkenplan als de berekening."""
+    def endpoints(name):
+        if name == "B1":
+            return (0, DEPTH), (WIDTH, DEPTH)
+        if name == "B2":
+            return (
+                (EXT_X, DEPTH + EXT_DEPTH),
+                (WIDTH, DEPTH + EXT_DEPTH),
+            )
+        if name == "B3":
+            return (
+                (EXT_X, DEPTH),
+                (EXT_X, DEPTH + EXT_DEPTH),
+            )
+        if name.startswith("O"):
+            x = model.ext_x[int(name[1:])]
+            return (x, DEPTH), (x, DEPTH + EXT_DEPTH)
+
+        if name.startswith("W"):
+            ox = OPEN_X[int(name[1:-1]) - 1]
+            y = (
+                OPEN_Y - p.header[0] / 2
+                if name.endswith("o")
+                else OPEN_Y + OPEN_SIZE + p.header[0] / 2
+            )
+            return (
+                (ox - p.joist[0] / 2, y),
+                (ox + OPEN_SIZE + p.joist[0] / 2, y),
+            )
+
+        if name.startswith("D"):
+            suffix = (
+                name[-1] if name[-1] in ("o", "b") else ""
+            )
+            index = int(
+                name[1:-1] if suffix else name[1:]
+            )
+            x = model.main_x[index]
+
+            if suffix == "o":
+                return (
+                    (x, 0),
+                    (x, OPEN_Y - p.header[0] / 2),
+                )
+            if suffix == "b":
+                return (
+                    (x, OPEN_Y + OPEN_SIZE + p.header[0] / 2),
+                    (x, DEPTH),
+                )
+            return (x, 0), (x, DEPTH)
+
+        raise ValueError(
+            f"Geen tekenpositie bekend voor {name}"
+        )
+
+    fig = Figure(
+        figsize=(5.4, 3.7),
+        layout="constrained",
+        facecolor="white",
+    )
+    ax = fig.subplots()
+
+    for ox in OPEN_X:
+        ax.add_patch(Rectangle(
+            (ox, OPEN_Y),
+            OPEN_SIZE,
+            OPEN_SIZE,
+            facecolor="#d5edf8",
+            edgecolor="#86a6ba",
+            lw=1,
+        ))
+
+    for name in model.beams:
+        start, end = endpoints(name)
+        ax.plot(
+            [start[0], end[0]],
+            [start[1], end[1]],
+            color="#b8b2a6",
+            lw=1,
+            zorder=2,
+        )
+
+    ax.plot(
+        [0, WIDTH, WIDTH, EXT_X, EXT_X, 0, 0],
+        [
+            0, 0,
+            DEPTH + EXT_DEPTH,
+            DEPTH + EXT_DEPTH,
+            DEPTH, DEPTH, 0,
+        ],
+        color="#6b624f",
+        lw=1.5,
+    )
+
+    start, end = endpoints(selected)
+    xs = [start[0], end[0]]
+    ys = [start[1], end[1]]
+
+    ax.plot(xs, ys, color="white", lw=7, zorder=5)
+    ax.plot(xs, ys, color="#bd342c", lw=4, zorder=6)
+    ax.scatter(xs, ys, color="#bd342c", s=16, zorder=7)
+
+    if p.extra_column:
+        ax.scatter(
+            [p.column_x], [DEPTH],
+            color="#172d49", s=24, zorder=8,
+        )
+
+    ax.scatter(
+        [EXT_X], [DEPTH + EXT_DEPTH],
+        color="#172d49", s=24, zorder=8,
+    )
+    ax.set_title(
+        f"Ligging {selected} — rood gemarkeerd",
+        loc="left",
+        fontsize=11,
+    )
+    ax.set(
+        xlim=(-160, WIDTH + 160),
+        ylim=(-160, DEPTH + EXT_DEPTH + 160),
+        aspect="equal",
+    )
+    ax.axis("off")
+    return fig
+
 
 def show_calculation_method(p, result):
     st.markdown("### 1. Rekenmodel en belastingafdracht")
@@ -987,6 +1113,12 @@ def show_calculation_method(p, result):
     row = max(result["rows"], key=lambda r: r[key])
     case = max(row["cases"], key=lambda r: r[key])
     c = method_case(p, result, row, case)
+    st.pyplot(
+        draw_beam_minimap(
+            p, result["model"], row["name"]
+        ),
+        width="content",
+    )
 
     beam = c["beam"]
     L = beam.length
@@ -1202,7 +1334,6 @@ def show_calculation_method(p, result):
         f"kdef = {PROFILE['kdef']:.2f}; "
         f"ψ₂ = {PROFILE['psi2']:.2f}. "
         "De UGT-veiligheidsfactoren worden niet gebruikt "
-        "voor doorbuiging. Er is geen zeeg aangenomen."
     )
 
     if c["point_case"]:
