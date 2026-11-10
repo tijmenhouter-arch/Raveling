@@ -75,6 +75,10 @@ class Parameters:
     bearing_right: int = 150
     extra_column: bool = False
     column_x: float = 3025.0
+    snow: float = 0.56
+    rain: float = 1.0
+    maintenance_area: float = 1.0
+    maintenance_point: float = 1.5  # kN
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -147,6 +151,19 @@ def reactions(length, loads):
                  for kind, a, b, v in loads)
     right = moment / length
     return total - right, right
+
+def variable_loads(p):
+    return {
+        "Sneeuw": p.snow,
+        "Regenwater": p.rain,
+        "Onderhoud vlaklast": p.maintenance_area,
+    }
+
+
+def frame_line_weight(p):
+    """Eigen gewicht opstandprofiel in N/mm, numeriek gelijk aan kN/m."""
+    b, h = p.header
+    return b * h * DENSITY * 9.81 / 1e9
 
 
 def _simple_response(length, loads, sample_points=()):
@@ -321,6 +338,8 @@ def point_envelope(length, support):
 
 def build_model(p):
     m = Model()
+    area_loads = variable_loads(p)
+    frame_q = frame_line_weight(p)
     bw = p.joist[0]
     hw = p.header[0]
     left_offset, right_offset = p.bearing_left / 2, p.bearing_right / 2
@@ -356,7 +375,7 @@ def build_model(p):
         if index in (0, len(m.main_x)-1):
             # Randstroken dragen direct naar doorlopend ondersteunde muurregel.
             for case in CASES:
-                area_load = ROOF_DEAD + {18: .10, 22: .12}[p.sheet] + CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                area_load = ROOF_DEAD + {18: .10, 22: .12}[p.sheet] + CEILING_DEAD if case == "Permanent" else area_loads[case]
                 m.wall_loads[case] += area_load*(b-a)*DEPTH/1000
             continue
         if opening is None:
@@ -372,7 +391,7 @@ def build_model(p):
             # Dakstrook minus de projectie van de twee vrije lichtstraatopeningen.
             removed = sum(max(0.0, min(b, ox+OPEN_SIZE)-max(a, ox)) for ox in OPEN_X)
             for case in CASES:
-                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
                 add_q(beam, case, surface*(b-a)/1000, 0, OPEN_Y)
                 add_q(beam, case, surface*(b-a-removed)/1000, OPEN_Y, OPEN_Y+OPEN_SIZE)
                 add_q(beam, case, surface*(b-a)/1000, OPEN_Y+OPEN_SIZE, DEPTH)
@@ -392,7 +411,7 @@ def build_model(p):
                 # ook de halve wisselbreedte: geen verloren/dubbele dakstrook.
                 projection = OPEN_Y if suffix == "o" else DEPTH-OPEN_Y-OPEN_SIZE
                 for case in CASES:
-                    surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                    surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
                     add_q(beam, case, surface*(b-a)/1000*projection/length)
 
     # De 25% per rand wordt als lijnlast op de bijbehorende rand gezet.
@@ -402,19 +421,37 @@ def build_model(p):
             beam = member(name, "Ravelbalk", p.header, OPEN_SIZE+bw,
                           ((side_names[j, "L"], axis), (side_names[j, "R"], axis)))
             headers.append(name)
+            # Horizontale zijde van het opstandframe boven deze wissel.
+            # Totale lengte inclusief beide hoeken: opening + 2 profielbreedten.
+            # Het totale gewicht wordt geprojecteerd op de vrije opening.
+            add_q(
+                beam,
+                "Permanent",
+                frame_q * (OPEN_SIZE + 2 * hw) / OPEN_SIZE,
+                bw / 2,
+                bw / 2 + OPEN_SIZE,
+            )
             for case in CASES:
-                total = SKYLIGHT_KG*9.81 if case == "Permanent" else AREA_LOADS[case]*(OPEN_SIZE/1000)**2*1000
+                total = SKYLIGHT_KG*9.81 if case == "Permanent" else area_loads[case]*(OPEN_SIZE/1000)**2*1000
                 add_q(beam, case, total/4/OPEN_SIZE, bw/2, bw/2+OPEN_SIZE)
         for side in ("L", "R"):
             beam = m.beams[side_names[j, side]]
+            # Verticale framezijde draagt langs haar lengte op de dwarsbalk.
+            add_q(
+                beam,
+                "Permanent",
+                frame_q,
+                OPEN_Y,
+                OPEN_Y + OPEN_SIZE,
+            )
             for case in CASES:
-                total = SKYLIGHT_KG*9.81 if case == "Permanent" else AREA_LOADS[case]*(OPEN_SIZE/1000)**2*1000
+                total = SKYLIGHT_KG*9.81 if case == "Permanent" else area_loads[case]*(OPEN_SIZE/1000)**2*1000
                 add_q(beam, case, total/4/OPEN_SIZE, OPEN_Y, OPEN_Y+OPEN_SIZE)
 
     for i, (x, a, b) in enumerate(tributaries(m.ext_x, EXT_X, WIDTH)):
         if i == len(m.ext_x)-1:
             for case in CASES:
-                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
                 m.wall_loads[case] += surface*(b-a)*EXT_DEPTH/1000
             continue
         if i == 0:
@@ -424,7 +461,7 @@ def build_model(p):
                           (("B1", x+left_offset), ("B2", x-EXT_X+left_offset)))
             extension.append(beam.name)
         for case in CASES:
-            surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+            surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
             add_q(beam, case, surface*(b-a)/1000, 0, EXT_DEPTH)
 
     # Doorlopend ondersteunde regels: eigen gewicht direct naar de muren.
@@ -545,12 +582,12 @@ def analyze(p, keep_details=True):
 
         M = (
             PROFILE["gamma_g"] * G["maxM"]
-            + PROFILE["gamma_q"] * POINT_LOAD_N * point_M
+            + PROFILE["gamma_q"] * (p.maintenance_point * 1000) * point_M
         )
 
         u = (
             (1 + PROFILE["kdef"]) * G["maxuEI"] / EI
-            + POINT_LOAD_N * point_uEI / EI
+            + (p.maintenance_point * 1000) * point_uEI / EI
         )
         records.append(dict(case="Onderhoud puntlast · envelop", moment=M/1e6,
                             deflection=u, ugt=M/W/strength,
@@ -571,6 +608,7 @@ def analyze(p, keep_details=True):
     bgt = max(r["bgt"] for r in rows)*(1+1e-4)
     volume = sum(b.section[0]*b.section[1]*b.length/1e9 for b in m.beams.values())
     volume += p.edge[0]*p.edge[1]*(WIDTH+2*DEPTH+EXT_DEPTH)/1e9
+    volume += (len(OPEN_X)* (4 * OPEN_SIZE + 4 * p.header[0])* p.header[0]* p.header[1]/ 1e9)
     return dict(ugt=ugt, bgt=bgt, passed=ugt<=1 and bgt<=1, rows=rows,
                 volume=volume, balance=balance, applied=applied, terminal=terminal,
                 model=m if keep_details else None)
@@ -632,6 +670,47 @@ def draw_plan(p, model):
         ax.text(ox+OPEN_SIZE/2,OPEN_Y+OPEN_SIZE/2,
                 f"Lichtstraat {i}\n1.500 × 1.500 mm\n120 kg",
                 ha="center",va="center",color=ink,fontsize=10,fontweight="bold",zorder=7)
+    # Apart opstandframe bovenop de bestaande balklaag.
+    for ox in OPEN_X:
+        timber(
+            ox - hw, OPEN_Y - hw,
+            OPEN_SIZE + 2 * hw, hw,
+            orange, z=7,
+        )
+        timber(
+            ox - hw, OPEN_Y + OPEN_SIZE,
+            OPEN_SIZE + 2 * hw, hw,
+            orange, z=7,
+        )
+        timber(
+            ox - hw, OPEN_Y,
+            hw, OPEN_SIZE,
+            orange, z=7,
+        )
+        timber(
+            ox + OPEN_SIZE, OPEN_Y,
+            hw, OPEN_SIZE,
+            orange, z=7,
+        )
+
+    ax.annotate(
+        "Opstandframe\nbovenop balklaag",
+        (
+            OPEN_X[0] + OPEN_SIZE + hw / 2,
+            OPEN_Y + OPEN_SIZE / 2,
+        ),
+        xytext=(2740, OPEN_Y + OPEN_SIZE / 2),
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=ink,
+        arrowprops=dict(
+            arrowstyle="->",
+            color=ink,
+            lw=0.8,
+        ),
+        zorder=10,
+    )
     # Randbalken buiten het schematische binnenvlak; alle balken één laag.
     timber(-ew,-ew,WIDTH+2*ew,ew,orange,z=8)
     timber(-ew,0,ew,DEPTH,orange,z=8)
@@ -677,11 +756,555 @@ def draw_plan(p, model):
         ax.annotate("Extra kolom",(p.column_x - ew / 2, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
     ax.set_title("Raveling dak — plattegrond (bovenaanzicht)",loc="left",
                  fontsize=16,fontweight="bold",color=ink,pad=20)
-    ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · alle balken in één laag",
+    ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · opstandframes bovenop balklaag",
             fontsize=9,color=ink)
     ax.set(xlim=(-850,WIDTH+750),ylim=(-960,DEPTH+EXT_DEPTH+700),aspect="equal")
     ax.axis("off")
     return fig
+
+def method_case(p, result, row, case):
+    """Reconstrueer hetzelfde lastgeval als de controleberekening."""
+    beam = result["model"].beams[row["name"]]
+    support = column_axis(p) if beam.name == "B1" else None
+
+    b, h = beam.section
+    material = MATERIALS[p.strength]
+    E, fm = material["E"], material["fm"]
+    A, W, I = b * h, b * h**2 / 6, b * h**3 / 12
+
+    G = beam.loads["Permanent"]
+    point_case = case["case"].startswith("Onderhoud puntlast")
+    only_g = case["case"] == "Permanent"
+    Q = []
+
+    if not point_case and not only_g:
+        base = case["case"].split(" · ")[0]
+        Q = beam.loads[base]
+
+        if "linkerveld" in case["case"]:
+            Q = field_loads(Q, 0, support)
+        elif "rechterveld" in case["case"]:
+            Q = field_loads(Q, support, beam.length)
+
+    gamma_g = (
+        PROFILE["gamma_g_only"]
+        if only_g else PROFILE["gamma_g"]
+    )
+    kmod = (
+        PROFILE["kmod_g"]
+        if only_g else PROFILE["kmod_q"]
+    )
+
+    design = [
+        (k, a, z, v * gamma_g)
+        for k, a, z, v in G
+    ]
+    design += [
+        (k, a, z, v * PROFILE["gamma_q"])
+        for k, a, z, v in Q
+    ]
+
+    service = [
+        (k, a, z, v * (1 + PROFILE["kdef"]))
+        for k, a, z, v in G
+    ]
+    service += [
+        (
+            k, a, z,
+            v * (1 + PROFILE["kdef"] * PROFILE["psi2"])
+        )
+        for k, a, z, v in Q
+    ]
+
+    g_response = response(beam.length, G, support)
+    design_response = response(beam.length, design, support)
+    service_response = response(beam.length, service, support)
+
+    M = design_response["maxM"]
+    u = service_response["maxuEI"] / (E * I)
+    unit_M = unit_u = 0.0
+
+    if point_case:
+        unit_M, unit_u = point_envelope(
+            beam.length, support
+        )
+        P = p.maintenance_point * 1000
+
+        M = (
+            gamma_g * g_response["maxM"]
+            + PROFILE["gamma_q"] * P * unit_M
+        )
+        u = (
+            (1 + PROFILE["kdef"])
+            * g_response["maxuEI"] / (E * I)
+            + P * unit_u / (E * I)
+        )
+
+    strength = kmod * fm / PROFILE["gamma_m"]
+
+    return dict(
+        beam=beam,
+        support=support,
+        A=A, W=W, I=I, E=E, fm=fm,
+        G=G, Q=Q,
+        gamma_g=gamma_g,
+        kmod=kmod,
+        strength=strength,
+        point_case=point_case,
+        only_g=only_g,
+        M=M,
+        u=u,
+        g_response=g_response,
+        design=design_response,
+        service=service_response,
+        unit_M=unit_M,
+        unit_u=unit_u,
+        ugt=M / W / strength,
+        bgt=u / row["limit"],
+    )
+
+
+def show_calculation_method(p, result):
+    st.markdown("### 1. Rekenmodel en belastingafdracht")
+    st.write(
+        "De dakbelasting wordt verdeeld over de werkelijke "
+        "balkposities. Naast iedere lichtstraat liggen vaste "
+        "doorgaande dwarsbalken. Die behouden het dwarsbalkprofiel. "
+        "Daarboven ligt een apart opstandframe van vier "
+        "ravelprofielen per lichtstraat."
+    )
+    st.write(
+        "De berekeningsvolgorde is: korte dwarsbalken → "
+        "horizontale wissels → doorgaande dwarsbalken → "
+        "randbalken. Reacties worden per lastgeval op hun "
+        "werkelijke aansluitpositie doorgegeven. B3 draagt "
+        "onderaan op B1; staat daar de extra kolom, dan vangt "
+        "die deze reactie rechtstreeks op."
+    )
+
+    sheet_dead = {18: 0.10, 22: 0.12}[p.sheet]
+    roof = ROOF_DEAD + sheet_dead + CEILING_DEAD
+
+    loads_table = [
+        {
+            "Belasting": "Dakbedekking + isolatie",
+            "Waarde": ROOF_DEAD,
+            "Eenheid": "kN/m²",
+        },
+        {
+            "Belasting": f"Underlayment {p.sheet} mm",
+            "Waarde": sheet_dead,
+            "Eenheid": "kN/m²",
+        },
+        {
+            "Belasting": "Plafond inclusief regels",
+            "Waarde": CEILING_DEAD,
+            "Eenheid": "kN/m²",
+        },
+    ]
+    loads_table += [
+        {"Belasting": k, "Waarde": v, "Eenheid": "kN/m²"}
+        for k, v in variable_loads(p).items()
+    ]
+    loads_table += [
+        {
+            "Belasting": "Onderhoudspuntlast",
+            "Waarde": p.maintenance_point,
+            "Eenheid": "kN",
+        },
+        {
+            "Belasting": "Massa per lichtstraat",
+            "Waarde": SKYLIGHT_KG,
+            "Eenheid": "kg",
+        },
+    ]
+
+    st.dataframe(
+        pd.DataFrame(loads_table),
+        hide_index=True,
+        width="stretch",
+    )
+    st.latex(
+        rf"g_{{dak}}={ROOF_DEAD:.2f}+{sheet_dead:.2f}"
+        rf"+{CEILING_DEAD:.2f}={roof:.2f}"
+        r"\;\mathrm{kN/m^2}"
+    )
+    st.latex(
+        r"g_{balk}=\frac{b h}{10^6}\rho"
+        r"\frac{9.81}{1000}\;[\mathrm{kN/m}]"
+    )
+    st.latex(
+        r"g_{lijn}=g_{dak}s_{toegerekend}+g_{balk}"
+    )
+    st.caption(
+        "De toegerekende dakstrook loopt tot halverwege "
+        "de buurassen. Daklagen en plafond vervallen over "
+        "de vrije lichtstraatopening. De korte balken krijgen "
+        "de volledige bijbehorende dakprojectie toegerekend."
+    )
+
+    st.latex(
+        rf"G_{{lichtstraat}}={SKYLIGHT_KG:g}\cdot9.81/1000"
+        rf"={SKYLIGHT_KG * 9.81 / 1000:.4f}\;\mathrm{{kN}}"
+    )
+    st.latex(
+        rf"G_{{per\ rand}}=G_{{lichtstraat}}/4"
+        rf"={SKYLIGHT_KG * 9.81 / 4000:.4f}\;\mathrm{{kN}}"
+    )
+    st.write(
+        "Iedere framezijde ontvangt 25% van de lichtstraatlast, "
+        "gelijkmatig langs de openingrand. Ook de uniforme "
+        "variabele lichtstraatbelasting wordt zo verdeeld."
+    )
+
+    frame_length = 4 * OPEN_SIZE + 4 * p.header[0]
+    frame_weight = (
+        frame_line_weight(p) * frame_length / 1000
+    )
+    st.write(
+        f"Per opstandframe: twee zijden van {OPEN_SIZE:g} mm "
+        f"en twee zijden van "
+        f"{OPEN_SIZE + 2 * p.header[0]:g} mm. "
+        f"Totale lengte: {frame_length:g} mm. "
+        f"Eigen gewicht: **{frame_weight:.4f} kN per frame**."
+    )
+    st.write(
+        "Dit framegewicht komt bovenop het lichtstraatgewicht. "
+        "De verticale framezijden dragen op de doorgaande "
+        "dwarsbalken; de horizontale zijden op de bestaande "
+        "wissels. Het frame wordt rondom ondersteund "
+        "verondersteld. Draagvlakken, excentriciteit en "
+        "bevestigingen zijn nog niet gecontroleerd."
+    )
+
+    st.markdown("### 2. Casus: de maatgevende balk")
+    choice = st.selectbox(
+        "Casus",
+        ["Hoogste UGT", "Hoogste BGT"],
+        key="method_choice",
+    )
+    key = "ugt" if choice == "Hoogste UGT" else "bgt"
+    row = max(result["rows"], key=lambda r: r[key])
+    case = max(row["cases"], key=lambda r: r[key])
+    c = method_case(p, result, row, case)
+
+    beam = c["beam"]
+    L = beam.length
+    b, h = beam.section
+
+    st.write(
+        f"**{beam.name} · {beam.group} · "
+        f"{section_text(beam.section)} · {p.strength}**"
+    )
+    st.write(
+        f"Maatgevend scenario: **{case['case']}**. "
+        f"Afstand tussen de buitenste oplegassen: **{L:g} mm**."
+    )
+
+    if c["support"] is not None:
+        st.write(
+            f"Extra steunpunt op {c['support']:g} mm vanaf "
+            f"de linker oplegas. Veldlengten: "
+            f"{c['support']:g} en {L - c['support']:g} mm. "
+            "B1 blijft doorgaand boven de kolom."
+        )
+
+    st.latex(
+        rf"A=b h={b}\cdot{h}={c['A']:.0f}"
+        r"\;\mathrm{mm^2}"
+    )
+    st.latex(
+        rf"W=\frac{{b h^2}}{{6}}={c['W']:.2f}"
+        rf"\;\mathrm{{mm^3}},\qquad "
+        rf"I=\frac{{b h^3}}{{12}}={c['I']:.2f}"
+        r"\;\mathrm{mm^4}"
+    )
+    st.latex(
+        rf"E={c['E']:.0f}\;\mathrm{{N/mm^2}},\qquad "
+        rf"EI={c['E'] * c['I']:.3e}"
+        r"\;\mathrm{N\,mm^2}"
+    )
+
+    own = b * h * DENSITY * 9.81 / 1e9
+    st.write(
+        f"Eigen gewicht van deze balk: **{own:.5f} kN/m**, "
+        f"met ρ = {DENSITY:g} kg/m³."
+    )
+
+    st.markdown("### 3. Werkelijke belastingen op deze balk")
+    items = []
+    for label, loads in [
+        ("Permanent", c["G"]),
+        ("Variabel gekozen scenario", c["Q"]),
+    ]:
+        for kind, a, z, v in loads:
+            items.append({
+                "Herkomst": label,
+                "Type": "Puntlast" if kind == "P" else "Lijnlast",
+                "Begin / positie [mm]": a,
+                "Eind [mm]": z,
+                "Waarde": v / 1000 if kind == "P" else v,
+                "Eenheid": "kN" if kind == "P" else "kN/m",
+            })
+
+    st.dataframe(
+        pd.DataFrame(items).round(5),
+        hide_index=True,
+        width="stretch",
+    )
+    st.write(
+        "Permanente puntlasten zijn onder andere reacties "
+        "uit andere balken. Hun aandeel in daklagen, "
+        "lichtstraten en eigen gewicht zit daar al in; "
+        "dit wordt niet opnieuw toegevoegd."
+    )
+    st.write(
+        f"Totaal permanent: "
+        f"**{load_total(c['G']) / 1000:.4f} kN**. "
+        f"Totaal variabele lijn-/puntreacties: "
+        f"**{load_total(c['Q']) / 1000:.4f} kN**."
+    )
+
+    st.markdown("### 4. Oplegreacties en momenten")
+    st.latex(
+        r"R_R=\frac{\sum P_i a_i"
+        r"+\sum q_j(b_j-a_j)(a_j+b_j)/2}{L},"
+        r"\qquad R_L=\sum F-R_R"
+    )
+    st.caption(
+        "Dit zijn de evenwichtsformules van de vrij opgelegde "
+        "basisbalk. q is N/mm, P is N en posities zijn mm. "
+        "1 kN/m = 1 N/mm."
+    )
+
+    if c["support"] is not None:
+        st.latex(
+            r"R_C=\frac{[EIu_0](c)}{c^2(L-c)^2/(3L)},"
+            r"\qquad u(c)=0"
+        )
+        st.write(
+            "De kolomreactie wordt als opwaartse kracht "
+            "op de basisbalk gezet. Daarna worden reacties, "
+            "momenten en vervormingen opnieuw bepaald. "
+            "Ook het negatieve moment boven de kolom "
+            "wordt meegenomen."
+        )
+
+    st.latex(
+        r"M(x)=R_Lx-\sum_i P_i\langle x-a_i\rangle"
+        r"-\sum_j\frac{q_j}{2}"
+        r"\left(\langle x-a_j\rangle^2"
+        r"-\langle x-b_j\rangle^2\right)"
+    )
+    st.caption(
+        "⟨x−a⟩ = max(x−a, 0). De kolomreactie is, indien "
+        "aanwezig, opgenomen als opwaartse puntkracht. "
+        "Momentextrema worden bepaald bij lastgrenzen "
+        "en waar de dwarskracht nul is."
+    )
+
+    if not c["point_case"]:
+        r = c["design"]
+        st.dataframe(
+            pd.DataFrame({
+                "Oplegging": ["Links", "Extra kolom", "Rechts"],
+                "UGT-reactie [kN]": [
+                    r["left"] / 1000,
+                    r["middle"] / 1000,
+                    r["right"] / 1000,
+                ],
+            }).round(4),
+            hide_index=True,
+            width="stretch",
+        )
+        if min(r["left"], r["middle"], r["right"]) < -1e-6:
+            st.warning(
+                "Dit scenario vraagt een trekreactie bij een "
+                "oplegging. Verankering tegen oplichten "
+                "is nog niet getoetst."
+            )
+    else:
+        st.write(
+            "De onderhoudspuntlast is een lokale envelop. "
+            "De hoogste moment- en doorbuigingswaarde "
+            "hoeven niet bij dezelfde lastpositie te horen. "
+            "Daarom worden hiervoor geen fictieve "
+            "gezamenlijke reacties of curves getoond."
+        )
+
+    st.markdown("### 5. UGT: buigsterkte")
+    gamma_q = 0.0 if c["only_g"] else PROFILE["gamma_q"]
+    st.latex(
+        rf"E_d={c['gamma_g']:.2f}G_k"
+        rf"+{gamma_q:.2f}Q_k"
+    )
+
+    if c["point_case"]:
+        st.latex(
+            r"M_{Ed,envelop}="
+            r"\gamma_G\max|M_G|"
+            r"+\gamma_QP_k\max|M_{P=1N}|"
+        )
+        st.write(
+            f"Puntlast: {p.maintenance_point:.3f} kN. "
+            f"Permanente momentpiek: "
+            f"{c['g_response']['maxM'] / 1e6:.4f} kNm. "
+            f"Eenheidspuntlast-envelop: "
+            f"{c['unit_M']:.4f} Nmm/N."
+        )
+
+    st.latex(
+        rf"M_{{Ed,max}}={c['M'] / 1e6:.4f}"
+        rf"\;\mathrm{{kNm}},\qquad "
+        rf"\sigma_{{m,d}}=\frac{{M_{{Ed,max}}}}{{W}}"
+        rf"={c['M'] / c['W']:.4f}\;\mathrm{{N/mm^2}}"
+    )
+    st.latex(
+        rf"f_{{m,d}}="
+        rf"\frac{{k_{{mod}}f_{{m,k}}}}{{\gamma_M}}"
+        rf"=\frac{{{c['kmod']:.2f}\cdot{c['fm']:.0f}}}"
+        rf"{{{PROFILE['gamma_m']:.2f}}}"
+        rf"={c['strength']:.4f}\;\mathrm{{N/mm^2}}"
+    )
+    sign = r"\leq" if c["ugt"] <= 1 else ">"
+    st.latex(
+        rf"\eta_{{UGT}}="
+        rf"\frac{{\sigma_{{m,d}}}}{{f_{{m,d}}}}"
+        rf"={c['ugt']:.4f}\quad {sign}\quad1.00"
+    )
+
+    st.markdown("### 6. BGT: directe vervorming en kruip")
+    st.latex(r"EIu''(x)=-M(x)")
+    st.write(
+        "De momentfunctie wordt tweemaal geïntegreerd. "
+        "De integratieconstanten volgen uit nulverplaatsing "
+        "bij de eindopleggingen; bij de kolom geldt "
+        "aanvullend nulverplaatsing."
+    )
+    st.write(
+        "Bij een volledig verdeelde last of een puntlast "
+        "midden op een vrij opgelegde balk geeft dit:"
+    )
+    st.latex(
+        r"u_{max}=\frac{5qL^4}{384EI},"
+        r"\qquad u_{P,midden}=\frac{PL^3}{48EI}"
+    )
+    st.write(
+        "De werkelijke balk heeft gedeeltelijke lijnlasten "
+        "en/of puntlasten. Daarom gebruikt de app de "
+        "geïntegreerde lastfuncties en geen gemiddelde lijnlast."
+    )
+    st.latex(
+        r"u_{fin}(x)=(1+k_{def})u_G(x)"
+        r"+(1+k_{def}\psi_2)u_Q(x)"
+    )
+    st.write(
+        f"kdef = {PROFILE['kdef']:.2f}; "
+        f"ψ₂ = {PROFILE['psi2']:.2f}. "
+        "De UGT-veiligheidsfactoren worden niet gebruikt "
+        "voor doorbuiging. Er is geen zeeg aangenomen."
+    )
+
+    if c["point_case"]:
+        st.latex(
+            r"u_{fin,envelop}="
+            r"(1+k_{def})\max|u_G|"
+            r"+P_k\max|u_{P=1N}|"
+        )
+    else:
+        st.caption(
+            "Eerst worden de vervormingslijnen gecombineerd; "
+            "daarna wordt het maximum bepaald. De "
+            "afzonderlijke maxima worden niet zonder "
+            "meer opgeteld."
+        )
+
+    st.write(
+        f"Einddoorbuiging voor dit scenario: "
+        f"**{c['u']:.4f} mm**. "
+        f"Grens: **{row['limit']:.4f} mm**."
+    )
+    st.latex(
+        rf"u_{{lim}}=0.004L_{{ref}}"
+        rf"={row['limit']:.4f}\;\mathrm{{mm}},"
+        rf"\qquad\eta_{{BGT}}="
+        rf"\frac{{u_{{fin}}}}{{u_{{lim}}}}"
+        rf"={c['bgt']:.4f}"
+    )
+    st.caption(
+        "Voor B1 met extra kolom geldt conservatief "
+        "de kortste veldlengte als Lref voor de hele balk. "
+        "De doorbuiging is ten opzichte van de eigen opleglijn."
+    )
+
+    if not c["point_case"]:
+        fig = Figure(figsize=(9, 4.5), layout="constrained")
+        axes = fig.subplots(2, 1)
+
+        axes[0].plot(
+            c["design"]["x"],
+            c["design"]["M"] / 1e6,
+            color="#b47016",
+        )
+        axes[0].set_ylabel("Moment UGT [kNm]")
+
+        axes[1].plot(
+            c["service"]["x"],
+            c["service"]["uEI"] / (c["E"] * c["I"]),
+            color="#167b83",
+        )
+        axes[1].set(
+            ylabel="Einddoorbuiging [mm]",
+            xlabel="Positie vanaf linker oplegas [mm]",
+        )
+
+        for ax in axes:
+            ax.axhline(0, color="gray", lw=0.7)
+            if c["support"] is not None:
+                ax.axvline(
+                    c["support"], color="gray", ls=":"
+                )
+
+        st.pyplot(fig, width="stretch")
+
+    st.markdown("### 7. Alle scenario's voor deze balk")
+    st.dataframe(
+        pd.DataFrame(row["cases"]).rename(columns={
+            "case": "Scenario",
+            "moment": "Moment [kNm]",
+            "deflection": "Einddoorbuiging [mm]",
+            "ugt": "UGT",
+            "bgt": "BGT",
+        }).round(4),
+        hide_index=True,
+        width="stretch",
+    )
+    st.write(
+        "UGT en BGT kunnen door verschillende scenario's "
+        "worden bepaald. De hoofdresultaten nemen ieder "
+        "afzonderlijk het maximum over alle balken "
+        "en scenario's."
+    )
+
+    st.markdown("### 8. Rekenprofiel en beperkingen")
+    st.json(PROFILE)
+    st.write(
+        "Grootste verschil tussen aangebrachte lasten "
+        "en eindreacties: "
+        f"{max(abs(v) for v in result['balance'].values()):.3e} N. "
+        "De hoofd-BGT bevat 0,01% numerieke toeslag; "
+        "de kolom-puntlastenvelop 0,1%."
+    )
+    st.warning(
+        "Dit is een deelcontrole volgens het voorlopige "
+        "referentieprofiel. Normcombinaties en kmod/psi2 "
+        "per belastingtype zijn nog niet definitief. "
+        "Afschuiving, stabiliteit, verbindingen/verankering, "
+        "draagvlakken van het opstandframe, kolom/fundering, "
+        "aanvullende plafondcriteria en wateraccumulatie "
+        "zijn niet getoetst. Meevervorming van dragende "
+        "balken en verbindingsslip zijn niet opgeteld."
+    )
 
 
 # ==================== EENVOUDIGE INTERFACE ====================
@@ -693,6 +1316,7 @@ def choose_section(label, default, key):
 def main():
     st.set_page_config(page_title="Optimalisatie raveling Schinkel",layout="wide")
     with st.sidebar:
+        mode = st.select_slider("Rekenmodus",["Controle", "Optimalisatie"],value="Controle",key="mode",)
         st.header("Ontwerpparameters")
         strength=st.selectbox("Sterkteklasse vurenhout",list(MATERIALS),key="strength")
         sheet=st.selectbox("Underlayment",[18,22],format_func=lambda x:f"{x} mm",key="sheet")
@@ -700,10 +1324,14 @@ def main():
         joist=choose_section("Dwarsbalkprofiel",(63,195),"joist")
         edge=choose_section("Randbalkprofiel",(75,245),"edge")
         header=choose_section("Lichtstraat ravelprofiel",(63,195),"header")
+        with st.expander("Variabele belastingen", expanded=False):
+            snow = st.number_input("Sneeuw [kN/m²]", min_value=0.0, value=0.56, step=0.01, key="snow",)
+            rain = st.number_input("Regenwater [kN/m²]", min_value=0.0,value=1.0,step=0.05,key="rain",)
+            maintenance_area = st.number_input("Onderhoud vlaklast [kN/m²]",min_value=0.0,value=1.0,step=0.05,key="maintenance_area",)
+            maintenance_point = st.number_input("Onderhoud puntlast [kN]",min_value=0.0,value=1.5,step=0.1,key="maintenance_point",)
         with st.expander("Opleglengtes",expanded=False):
             bearing_left=st.number_input("Muur / kolom links [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_left")
             bearing_right=st.number_input("Muur rechts [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_right")
-        st.caption("Alleen bij fysieke muur-/kolomopleggingen. Balkschoenen krijgen geen toeslag.")
         extra_column = st.toggle(
             "Extra kolom onder B1",
             value=False,
@@ -725,9 +1353,8 @@ def main():
                 "Op 3.025 mm ondersteunt deze kolom "
                 "de aansluiting B1–B3."
             )
-    p=Parameters(strength,sheet,spacing,joist,edge,header,bearing_left,bearing_right, extra_column, column_x)
+    p=Parameters(strength,sheet,spacing,joist,edge,header,bearing_left,bearing_right, extra_column, column_x, snow,rain,maintenance_area,maintenance_point)
     st.title("Optimalisatie raveling Schinkel")
-    mode=st.select_slider("Rekenmodus",["Controle","Optimalisatie"],value="Controle",key="mode")
     try:
         result=analyze(p)
     except (ValueError, ArithmeticError) as exc:
@@ -740,7 +1367,7 @@ def main():
     b.metric("BGT · einddoorbuiging",f"{result['bgt']:.2f}")
     status="VOLDOET" if result["passed"] else "VOLDOET NIET"
     (c.success if result["passed"] else c.error)(f"{status} — deelcontrole")
-    st.caption("Een benutting ≤ 1,00 voldoet voor de berekende toets. Waarden boven 1,00 blijven zichtbaar.")
+    st.caption("Een benutting ≤ 1,00 voldoet voor de berekende toets")
     worst_u=max(result["rows"],key=lambda r:r["ugt"])
     worst_b=max(result["rows"],key=lambda r:r["bgt"])
     st.caption(f"Bepalend UGT: {worst_u['name']} ({worst_u['ugt_case']}) · "
@@ -768,33 +1395,13 @@ def main():
                        "Kies een combinatie uit de tabel in de zijbalk om die te bekijken.")
 
     with st.expander("Berekening en uitgangspunten"):
-        st.write(f"Vaste permanente daklast: {ROOF_DEAD+{18:.10,22:.12}[sheet]+CEILING_DEAD:.2f} kN/m² "
-                 f"inclusief plafond ({CEILING_DEAD:.2f} kN/m²), buiten de openingen. "
-                 f"Houtdichtheid: {DENSITY:g} kg/m³. Lichtstraten: elk {SKYLIGHT_KG:g} kg.")
-        st.write("Per lichtstraat gaat 25% van het eigen gewicht én 25% van de uniforme variabele "
-                 "belasting naar iedere rand. Dit is de afgesproken modelaanname. "
-                 "Op de vrije opening zijn geen daklagen of plafond gerekend.")
-        st.write("Sneeuw 0,56; regenwater 1,00; onderhoud vlaklast 1,00 kN/m²: afzonderlijke scenario's "
-                 "op dak en lichtstraten. Onderhoudspuntlast 1,50 kN: conservatieve lokale envelop "
-                 "per onderdeel, zonder gelijktijdig alle balken te belasten.")
-        st.write("De waarden uit het referentievoorbeeld zijn nog geen gevalideerde "
-                 "normcombinaties. kmod/psi2 per belastingtype, regen op verhoogde lichtstraten, "
-                 "opstandgewicht, plafondcriteria en wateraccumulatie moeten nog worden vastgesteld.")
-        st.write("BGT is t.o.v. de eigen opleglijn; doorbuiging van bovenliggende/dragende balken "
-                 "en verbindingsslip zijn niet samengesteld. Reacties worden wel doorgegeven.")
-        st.json(PROFILE)
+        show_calculation_method(p, result)
         details=pd.DataFrame([{"Balk":r["name"],"Type":r["group"],"Profiel":r["section"],
                                "Oplegasafstand [mm]":r["length"],"UGT":r["ugt"],"BGT":r["bgt"],
                                "Einddoorbuiging [mm]":r["deflection"],"Grens [mm]":r["limit"],
                                "Bepalend UGT":r["ugt_case"],"Bepalend BGT":r["bgt_case"]}
                               for r in result["rows"]])
         st.dataframe(details.round(3),hide_index=True,width="stretch")
-        st.download_button("Download balkresultaten",details.to_csv(index=False,sep=";").encode("utf-8-sig"),
-                           "schinkel-controle.csv","text/csv")
-        st.caption("Evenwichtscontrole belastingafdracht: maximaal verschil "
-                   f"{max(abs(v) for v in result['balance'].values()):.2e} N. "
-                   "Optimalisatielijst: 16 voorlopige handelsmaten × 10 h.o.h.-waarden; "
-                   "leverbaarheid en plaatoverspanning worden niet getoetst.")
 
 
 if __name__=="__main__":
