@@ -630,7 +630,7 @@ def draw_plan(p, model):
                             [OPEN_Y,OPEN_Y+OPEN_SIZE+200],color="white",alpha=.4,lw=18,zorder=6)
             line.set_clip_path(glass)
         ax.text(ox+OPEN_SIZE/2,OPEN_Y+OPEN_SIZE/2,
-                f"Lichtstraat {i}\n1.500 × 1.500 mm\n120 kg · 25% per zijde",
+                f"Lichtstraat {i}\n1.500 × 1.500 mm\n120 kg",
                 ha="center",va="center",color=ink,fontsize=10,fontweight="bold",zorder=7)
     # Randbalken buiten het schematische binnenvlak; alle balken één laag.
     timber(-ew,-ew,WIDTH+2*ew,ew,orange,z=8)
@@ -673,8 +673,8 @@ def draw_plan(p, model):
     dim(DEPTH,DEPTH+EXT_DEPTH,EXT_X-430,True,label="1.220 mm")
     dim(0,DEPTH+EXT_DEPTH,WIDTH+430,True,label="4.044 mm",fs=12)
     if p.extra_column:
-        ax.scatter([p.column_x],[DEPTH + ew/2],s=110,color=ink,zorder=12,)
-        ax.annotate("Extra kolom",(p.column_x, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
+        ax.scatter([p.column_x - ew / 2],[DEPTH + ew/2],s=110,color=ink,zorder=12,)
+        ax.annotate("Extra kolom",(p.column_x - ew / 2, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
     ax.set_title("Raveling dak — plattegrond (bovenaanzicht)",loc="left",
                  fontsize=16,fontweight="bold",color=ink,pad=20)
     ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · alle balken in één laag",
@@ -701,8 +701,8 @@ def main():
         edge=choose_section("Randbalkprofiel",(75,245),"edge")
         header=choose_section("Lichtstraat ravelprofiel",(63,195),"header")
         with st.expander("Opleglengtes",expanded=False):
-            bearing_left=st.number_input("Muur / kolom links [mm]",min_value=1,max_value=500,value=150,step=10,key="bearing_left")
-            bearing_right=st.number_input("Muur rechts [mm]",min_value=1,max_value=500,value=150,step=10,key="bearing_right")
+            bearing_left=st.number_input("Muur / kolom links [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_left")
+            bearing_right=st.number_input("Muur rechts [mm]",min_value=1,max_value=500,value=120,step=10,key="bearing_right")
         st.caption("Alleen bij fysieke muur-/kolomopleggingen. Balkschoenen krijgen geen toeslag.")
         extra_column = st.toggle(
             "Extra kolom onder B1",
