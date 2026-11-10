@@ -20,8 +20,6 @@ REKENAFSPRAKEN
   de afzonderlijke maxima uit permanent. Geen dubbele afdracht van puntlasten.
 - De gebruiker levert de factoren uit het referentievoorbeeld. Hun toepassing
   op regen/sneeuw/onderhoud en gevolgklasse/Nationale Bijlage staat nog open.
-- Afschuiving, kip, druk loodrecht vezel, verbindingen, plafondcriteria,
-  wind/sneeuwophoping en vervormingsafhankelijke wateraccumulatie ontbreken.
 
 Bronnen voor verdere validatie:
 https://eurocodes.jrc.ec.europa.eu/sites/default/files/2022-06/EN1995_2_Winter.pdf
@@ -75,6 +73,8 @@ class Parameters:
     header: tuple[int, int] = (63, 195)
     bearing_left: int = 150
     bearing_right: int = 150
+    extra_column: bool = False
+    column_x: float = 3025.0
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -149,7 +149,7 @@ def reactions(length, loads):
     return total - right, right
 
 
-def response(length, loads):
+def _simple_response(length, loads, sample_points=()):
     """Exacte momenten-extrema, numerieke evaluatie van Euler-Bernoulli u*EI.
 
     Macaulay-integratie van punt- en gedeeltelijk verdeelde lasten.
@@ -175,7 +175,7 @@ def response(length, loads):
             root = middle + shear / slope
             if a < root < b:
                 extrema.append(root)
-    x = np.unique(np.r_[np.linspace(0.0, length, 161), knots, extrema])
+    x = np.unique(np.r_[np.linspace(0.0, length, 161),knots, extrema, sample_points]  )
 
     def values(xx):
         xx = np.asarray(xx)
@@ -196,15 +196,16 @@ def response(length, loads):
         return moment, down
 
     moment, down = values(x)
-    i = int(np.argmax(down))
+    i = int(np.argmax(np.abs(down)))
     if 0 < i < len(x)-1:
         # Lokale coördinaten voorkomen slechte conditionering van de fit.
-        coeff = np.polyfit(x[i-1:i+2]-x[i], down[i-1:i+2], 2)
+        sign = 1 if down[i] >= 0 else -1
+        coeff = np.polyfit(x[i-1:i+2]-x[i], sign *down[i-1:i+2], 2)
         if coeff[0] < 0:
             x_peak = x[i] - coeff[1] / (2*coeff[0])
             if x[i-1] <= x_peak <= x[i+1]:
                 u_peak = float(values([x_peak])[1][0])
-                if u_peak > down[i]:
+                if abs(u_peak) > abs(down[i]):
                     x = np.r_[x, x_peak]
                     moment, down = values(x)
     return {"left": left, "right": right, "x": x,
@@ -212,6 +213,111 @@ def response(length, loads):
             "maxM": float(np.max(np.abs(moment))),
             "maxuEI": float(np.max(np.abs(down)))}
 
+def displacement_ei(length, loads, x):
+    """Doorbuiging × EI van de basisbalk op positie x."""
+    left, _ = reactions(length, loads)
+    integral_x = left * x**3 / 6
+    integral_L = left * length**3 / 6
+
+    for kind, a, b, value in loads:
+        if kind == "P":
+            integral_x -= value * max(x-a, 0)**3 / 6
+            integral_L -= value * (length-a)**3 / 6
+        else:
+            integral_x -= value * (
+                max(x-a, 0)**4 - max(x-b, 0)**4
+            ) / 24
+            integral_L -= value * (
+                (length-a)**4 - (length-b)**4
+            ) / 24
+
+    return integral_L * x / length - integral_x
+
+
+def response(length, loads, support=None):
+    """Balk met eventueel één star verticaal tussensteunpunt."""
+    if support is None:
+        result = _simple_response(length, loads)
+        result["middle"] = 0.0
+        return result
+
+    if not 0 < support < length:
+        raise ValueError(
+            "De kolom moet tussen de eindopleggingen van B1 staan."
+        )
+
+    flexibility = (
+        support**2 * (length-support)**2 / (3*length)
+    )
+    middle = (
+        displacement_ei(length, loads, support)
+        / flexibility
+    )
+
+    corrected = [
+        *loads,
+        ("P", support, support, -middle),
+    ]
+    points = np.r_[
+        np.linspace(0, support, 161),
+        np.linspace(support, length, 161),
+    ]
+
+    result = _simple_response(length, corrected, points)
+    result["middle"] = middle
+    return result
+
+
+def column_axis(p):
+    # UI meet vanaf binnenzijde; rekenkern vanaf linker oplegas.
+    if not p.extra_column:
+        return None
+    return p.column_x + p.bearing_left / 2
+
+
+def field_loads(loads, left, right):
+    """Variabele belasting alleen in één veld van B1."""
+    result = []
+
+    for kind, a, b, value in loads:
+        if kind == "P":
+            if left <= a <= right:
+                result.append((kind, a, b, value))
+        elif min(b, right) > max(a, left):
+            result.append(
+                (kind, max(a, left), min(b, right), value)
+            )
+
+    return result
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def point_envelope(length, support):
+    """Lokale envelop van één verplaatsbare eenheidspuntlast."""
+    if support is None:
+        return length / 4, length**3 / 48
+
+    locations = np.unique(np.r_[
+        np.linspace(0, support, 161),
+        np.linspace(support, length, 161),
+    ])
+
+    max_moment = 0.0
+    max_deflection = 0.0
+
+    for x in locations:
+        result = response(
+            length,
+            [("P", x, x, 1.0)],
+            support,
+        )
+        max_moment = max(max_moment, result["maxM"])
+        max_deflection = max(
+            max_deflection, result["maxuEI"]
+        )
+
+    # Kleine toeslag vanwege bemonstering van de lastpositie.
+    return max_moment * 1.001, max_deflection * 1.001
 
 def build_model(p):
     m = Model()
@@ -338,11 +444,20 @@ def analyze(p, keep_details=True):
     rows = []
     for name in m.order:
         beam = m.beams[name]
+        support = column_axis(p) if name == "B1" else None
+
+        reference_length = (
+            min(support, beam.length-support)
+            if support is not None
+            else beam.length
+        )
+        limit = PROFILE["limit_ratio"] * reference_length
         b, h = beam.section
         W, EI = b*h*h/6, material["E"]*b*h**3/12
         calculated = {}
         for case in CASES:
-            calculated[case] = response(beam.length, beam.loads[case])
+            calculated[case] = response(beam.length, beam.loads[case], support)
+            terminal[case] += calculated[case]["middle"]
             for receiver, force in zip(beam.receivers,
                                        (calculated[case]["left"], calculated[case]["right"])):
                 if receiver is None:
@@ -363,28 +478,90 @@ def analyze(p, keep_details=True):
                 design_loads += [(kind,a,z,v*PROFILE["gamma_q"]) for kind,a,z,v in beam.loads[case]]
                 service_loads = [(kind,a,z,v*(1+PROFILE["kdef"])) for kind,a,z,v in beam.loads["Permanent"]]
                 service_loads += [(kind,a,z,v*(1+PROFILE["kdef"]*PROFILE["psi2"])) for kind,a,z,v in beam.loads[case]]
-                M = response(beam.length, design_loads)["maxM"]
-                u = response(beam.length, service_loads)["maxuEI"]/EI
+                M = response(beam.length, design_loads, support)["maxM"]
+                u = response(beam.length, service_loads, support)["maxuEI"]/EI
                 kmod = PROFILE["kmod_q"]
             strength = kmod*material["fm"]/PROFILE["gamma_m"]
             records.append(dict(case=case, moment=M/1e6, deflection=u,
                                 ugt=M/W/strength,
-                                bgt=u/(PROFILE["limit_ratio"]*beam.length)))
+                                bgt=u/limit))
+            if support is not None and case != "Permanent":
+                fields = [
+                    ("linkerveld", 0, support),
+                    ("rechterveld", support, beam.length),
+                ]
+
+                for suffix, start, end in fields:
+                    partial = field_loads(
+                        beam.loads[case], start, end
+                    )
+
+                    design = [
+                        (k, a, z, v * PROFILE["gamma_g"])
+                        for k, a, z, v
+                        in beam.loads["Permanent"]
+                    ]
+                    design += [
+                        (k, a, z, v * PROFILE["gamma_q"])
+                        for k, a, z, v in partial
+                    ]
+
+                    service = [
+                        (k, a, z, v * (1 + PROFILE["kdef"]))
+                        for k, a, z, v
+                        in beam.loads["Permanent"]
+                    ]
+                    service += [
+                        (
+                            k, a, z,
+                            v * (
+                                1 + PROFILE["kdef"]
+                                * PROFILE["psi2"]
+                            )
+                        )
+                        for k, a, z, v in partial
+                    ]
+
+                    moment = response(
+                        beam.length, design, support
+                    )["maxM"]
+                    deflection = response(
+                        beam.length, service, support
+                    )["maxuEI"] / EI
+
+                    records.append(dict(
+                        case=f"{case} · {suffix}",
+                        moment=moment / 1e6,
+                        deflection=deflection,
+                        ugt=moment / W / strength,
+                        bgt=deflection / limit,
+                    ))
         # Eén puntlastenvelop per los onderdeel. Dit zijn bovenbegrenzingen:
         # max(G+P) <= max(G)+max(P), zonder te doen alsof pieken samenvallen.
         strength = PROFILE["kmod_q"]*material["fm"]/PROFILE["gamma_m"]
-        M = PROFILE["gamma_g"]*G["maxM"]+PROFILE["gamma_q"]*POINT_LOAD_N*beam.length/4
-        u = (1+PROFILE["kdef"])*G["maxuEI"]/EI+POINT_LOAD_N*beam.length**3/(48*EI)
+        point_M, point_uEI = point_envelope(
+            beam.length, support
+        )
+
+        M = (
+            PROFILE["gamma_g"] * G["maxM"]
+            + PROFILE["gamma_q"] * POINT_LOAD_N * point_M
+        )
+
+        u = (
+            (1 + PROFILE["kdef"]) * G["maxuEI"] / EI
+            + POINT_LOAD_N * point_uEI / EI
+        )
         records.append(dict(case="Onderhoud puntlast · envelop", moment=M/1e6,
                             deflection=u, ugt=M/W/strength,
-                            bgt=u/(PROFILE["limit_ratio"]*beam.length)))
+                            bgt=u/limit))
         worst_u = max(records, key=lambda r:r["ugt"])
         worst_b = max(records, key=lambda r:r["bgt"])
         rows.append(dict(name=name, group=beam.group, section=section_text(beam.section),
                          length=beam.length, ugt=worst_u["ugt"], bgt=worst_b["bgt"],
                          ugt_case=worst_u["case"], bgt_case=worst_b["case"],
                          deflection=worst_b["deflection"],
-                         limit=PROFILE["limit_ratio"]*beam.length,
+                         limit=limit,
                          cases=records if keep_details else None))
     balance = {c:terminal[c]-applied[c] for c in CASES}
     if max(abs(v) for v in balance.values()) > 1e-5:
@@ -495,6 +672,9 @@ def draw_plan(p, model):
     dim(EXT_X,WIDTH,DEPTH+EXT_DEPTH+360,label="2.455 mm",fs=12)
     dim(DEPTH,DEPTH+EXT_DEPTH,EXT_X-430,True,label="1.220 mm")
     dim(0,DEPTH+EXT_DEPTH,WIDTH+430,True,label="4.044 mm",fs=12)
+    if p.extra_column:
+        ax.scatter([p.column_x],[DEPTH + ew/2],s=110,color=ink,zorder=12,)
+        ax.annotate("Extra kolom",(p.column_x, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
     ax.set_title("Raveling dak — plattegrond (bovenaanzicht)",loc="left",
                  fontsize=16,fontweight="bold",color=ink,pad=20)
     ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · alle balken in één laag",
@@ -523,8 +703,29 @@ def main():
         with st.expander("Opleglengtes",expanded=False):
             bearing_left=st.number_input("Muur / kolom links [mm]",min_value=1,max_value=500,value=150,step=10,key="bearing_left")
             bearing_right=st.number_input("Muur rechts [mm]",min_value=1,max_value=500,value=150,step=10,key="bearing_right")
-            st.caption("Alleen bij fysieke muur-/kolomopleggingen. Balkschoenen krijgen geen toeslag.")
-    p=Parameters(strength,sheet,spacing,joist,edge,header,bearing_left,bearing_right)
+        st.caption("Alleen bij fysieke muur-/kolomopleggingen. Balkschoenen krijgen geen toeslag.")
+        extra_column = st.toggle(
+            "Extra kolom onder B1",
+            value=False,
+            key="extra_column",
+        )
+
+        column_x = st.number_input(
+            "Kolom vanaf linker binnenzijde [mm]",
+            min_value=1,
+            max_value=5479,
+            value=3025,
+            step=10,
+            disabled=not extra_column,
+            key="column_x",
+        )
+
+        if extra_column:
+            st.caption(
+                "Op 3.025 mm ondersteunt deze kolom "
+                "de aansluiting B1–B3."
+            )
+    p=Parameters(strength,sheet,spacing,joist,edge,header,bearing_left,bearing_right, extra_column, column_x)
     st.title("Optimalisatie raveling Schinkel")
     mode=st.select_slider("Rekenmodus",["Controle","Optimalisatie"],value="Controle",key="mode")
     try:
