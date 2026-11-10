@@ -1,420 +1,192 @@
-"""Projectinvoer en uitbreidpunten. Alle lengtematen in mm, lasten in kN/m².
+                    *(b for _, _, b, _ in loads)})
+    extrema = []
+    for a, b in zip(knots, knots[1:]):
+        middle = (a + b) / 2
+        shear = left
+        slope = 0.0
+        for kind, start, end, value in loads:
+            if kind == "P":
+                shear -= value if start < middle else 0.0
+            else:
+                shear -= value * max(0.0, min(middle, end) - start)
+                if start < middle < end:
+                    slope += value
+        if slope:
+            root = middle + shear / slope
+            if a < root < b:
+                extrema.append(root)
+    x = np.unique(np.r_[np.linspace(0.0, length, 161), knots, extrema])
 
-Dit bestand bevat nog GEEN constructieve toets of optimalisatie.
-"""
-from dataclasses import asdict, dataclass, field
+    def values(xx):
+        xx = np.asarray(xx)
+        moment = left * xx
+        integral = left * xx**3 / 6
+        integral_L = left * length**3 / 6
+        for kind, a, b, value in loads:
+            xa, xb = np.maximum(xx-a, 0), np.maximum(xx-b, 0)
+            if kind == "P":
+                moment = moment - value * xa
+                integral = integral - value * xa**3 / 6
+                integral_L -= value * (length-a)**3 / 6
+            else:
+                moment = moment - value * (xa**2-xb**2) / 2
+                integral = integral - value * (xa**4-xb**4) / 24
+                integral_L -= value * ((length-a)**4-(length-b)**4) / 24
+        down = integral_L * xx / length - integral
+        return moment, down
 
-# Voorlopige handelsmatencatalogus. Stem werkelijke geschaafde maten en
-# leverbare combinaties af met de leverancier; breid deze lijst zelf uit.
-STANDARD_SECTIONS = [
-    (45, 145), (45, 170), (45, 195), (45, 220),
-    (63, 145), (63, 170), (63, 195), (63, 220), (63, 245),
-    (75, 195), (75, 220), (75, 245), (75, 270),
-    (100, 220), (100, 245), (100, 270),
-]
-
-
-@dataclass
-class Geometry:
-    main_width: int = 5480
-    main_depth: int = 2824
-    extension_width: int = 2455
-    extension_depth: int = 1220
-    skylight_size: int = 1500
-    skylight_x: tuple[int, int] = (490, 3490)
-    skylight_y: int = 662  # vanaf onderste rand hoofddeel
-
-    @property
-    def extension_x(self):
-        return self.main_width - self.extension_width
-
-
-@dataclass
-class Spans:
-    # Voorlopig binnenmaten. Later vervangen door werkelijke hart-op-hartmaten.
-    joist_main: int = 2824
-    joist_extension: int = 1220
-    upper_main: int = 5480
-    upper_extension: int = 2455
-    left_extension: int = 1220
-    # Positie langs B1 vanaf hart linker muuroplegging, geen extra steunpunt.
-    shoe_position: int = 3025
-
-
-@dataclass
-class Parameters:
-    timber: str = "Vuren"
-    strength_class: str = "C24"
-    sheet_mm: int = 18
-    spacing_mm: int = 600
-    joist_section: tuple[int, int] = (63, 195)
-    main_section: tuple[int, int] = (75, 245)
-    upper_section: tuple[int, int] = (75, 245)
-    left_section: tuple[int, int] = (63, 195)
-    trimmer_section: tuple[int, int] = (63, 195)
-    goal: str = "Minimaal houtvolume"
-    roof_dead: float = 0.15
-    snow: float = 0.56
-    rain: float = 1.0
-    maintenance_area: float = 1.0
-    maintenance_point: float = 1.5  # kN, geen vlaklast!
-    skylight_mass: float = 120.0  # kg per stuk
-    spans: Spans = field(default_factory=Spans)
-
-    @property
-    def sheet_dead(self):
-        return {18: 0.10, 22: 0.12}[self.sheet_mm]
-
-    @property
-    def roof_layers_dead(self):
-        return self.roof_dead + self.sheet_dead
-
-    def to_dict(self):
-        return asdict(self)
+    moment, down = values(x)
+    i = int(np.argmax(down))
+    if 0 < i < len(x)-1:
+        # Lokale coördinaten voorkomen slechte conditionering van de fit.
+        coeff = np.polyfit(x[i-1:i+2]-x[i], down[i-1:i+2], 2)
+        if coeff[0] < 0:
+            x_peak = x[i] - coeff[1] / (2*coeff[0])
+            if x[i-1] <= x_peak <= x[i+1]:
+                u_peak = float(values([x_peak])[1][0])
+                if u_peak > down[i]:
+                    x = np.r_[x, x_peak]
+                    moment, down = values(x)
+    return {"left": left, "right": right, "x": x,
+            "M": moment, "uEI": down,
+            "maxM": float(np.max(np.abs(moment))),
+            "maxuEI": float(np.max(np.abs(down)))}
 
 
-def validate(p: Parameters) -> list[str]:
-    errors = []
-    if not 0 < p.spans.shoe_position < p.spans.upper_main:
-        errors.append("De balkschoenpositie moet tussen de oplegassen van B1 liggen.")
-    if any(value <= 0 for value in asdict(p.spans).values()):
-        errors.append("Oplegasafstanden en balkschoenpositie moeten positief zijn.")
-    return errors
+def build_model(p):
+    m = Model()
+    bw = p.joist[0]
+    hw = p.header[0]
+    left_offset, right_offset = p.bearing_left / 2, p.bearing_right / 2
 
+    def member(name, group, section, length, receivers=(None, None)):
+        beam = Beam(name, group, section, float(length), receivers)
+        m.beams[name] = beam
+        # Eigen gewicht in N/mm. Halfopleggingen buiten het vrije veld inbegrepen.
+        add_q(beam, "Permanent", section[0]*section[1]*DENSITY*9.81/1e9)
+        return beam
 
-def design_joists(p: Parameters, geometry: Geometry) -> dict:
-    """TODO: dwarsbalken én raveling; resultaten/reacties per lastgeval.
+    B1 = member("B1", "Randbalk", p.edge, WIDTH+left_offset+right_offset)
+    B2 = member("B2", "Randbalk", p.edge, EXT_WIDTH+left_offset+right_offset)
+    B3 = member("B3", "Randbalk", p.edge, EXT_DEPTH+left_offset,
+                (("B1", EXT_X+left_offset), None))
 
-    Later: eigen gewicht, belastingafdracht lichtstraten, UGT en BGT.
-    None betekent niet berekend; gebruik nooit 0 als schijnresultaat.
-    """
-    return {"status": "Nog niet berekend", "ugt": None, "bgt": None,
-            "support_reactions_by_case": None}
+    fixed = sorted(x for start in OPEN_X for x in
+                   (start-bw/2, start+OPEN_SIZE+bw/2))
+    m.fixed_x = fixed
+    m.main_x = regular_grid([0.0, *fixed, WIDTH], p.spacing)
+    m.ext_x = regular_grid([EXT_X, WIDTH], p.spacing)
+    lower_axis = OPEN_Y-hw/2
+    upper_axis = OPEN_Y+OPEN_SIZE+hw/2
+    if lower_axis <= 0 or upper_axis >= DEPTH:
+        raise ValueError("Het gekozen ravelprofiel past niet rond de openingen.")
 
-
-def design_edge_beams(p: Parameters, joist_results: dict) -> dict:
-    """TODO: B3 -> reactie balkschoen -> B1; B2 draagt op kolom en muur.
-
-    B1 krijgt dwarsbalkreacties van twee kanten bij de opbouw én de
-    geconcentreerde reactie uit B3. Doorlopend ondersteunde randbalken
-    afzonderlijk behandelen, inclusief muurbevestigingen.
-    """
-    if joist_results["support_reactions_by_case"] is None:
-        return {"status": "Wacht op dwarsbalken en raveling", "ugt": None, "bgt": None}
-    return {"status": "Nog niet berekend", "ugt": None, "bgt": None}
-
-
-def optimize(p: Parameters, geometry: Geometry) -> dict:
-    """TODO: doorzoek STANDARD_SECTIONS en h.o.h.-opties na implementatie toetsen."""
-    return {"status": "Rekenmodel nog niet geïmplementeerd", "optimum": None}
-
-
-# ==================== TEKENINGEN ====================
-
-"""Schematische geometrie los van de instelbare rekenoverspanningen."""
-import math
-
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle, Polygon
-
-
-WOOD = "#b57a32"
-TEAL = "#167b83"
-INK = "#273b50"
-GLASS = "#d5edf8"
-
-
-def draw_plan(p: Parameters, g: Geometry, highlight: str = "Dwarsbalken"):
-    fig = Figure(figsize=(8, 6.3), layout="constrained")
-    ax = fig.subplots()
-    x0, w, d, e = g.extension_x, g.main_width, g.main_depth, g.extension_depth
-    ax.add_patch(Polygon([(0, 0), (w, 0), (w, d + e), (x0, d + e),
-                          (x0, d), (0, d)], facecolor="#faf7f0", edgecolor="none"))
-    joist_color = TEAL if highlight == "Dwarsbalken" else "#c7b38f"
-    # Gelijke veldverdeling: werkelijk getekende h.o.h. <= beoogde waarde.
-    # Vaste ravelbalken liggen daarnaast op de randen van de openingen.
-    n = math.ceil(w / p.spacing_mm)
-    for i in range(1, n):
-        x = i * w / n
-        opening = any(s < x < s + g.skylight_size for s in g.skylight_x)
-        intervals = [(0, g.skylight_y), (g.skylight_y + g.skylight_size, d)] if opening else [(0, d)]
-        for ya, yb in intervals:
-            ax.plot([x, x], [ya, yb], color=joist_color, lw=2)
-    n = math.ceil(g.extension_width / p.spacing_mm)
-    for i in range(1, n):
-        x = x0 + i * g.extension_width / n
-        ax.plot([x, x], [d, d + e], color=joist_color, lw=2)
-    for xa, ya, xb, yb in [(0, 0, w, 0), (0, 0, 0, d), (w, 0, w, d+e),
-                           (0, d, w, d), (x0, d+e, w, d+e), (x0, d, x0, d+e)]:
-        ax.plot([xa, xb], [ya, yb], color=WOOD, lw=5, solid_capstyle="butt")
-    for i, x in enumerate(g.skylight_x, 1):
-        for xx in (x, x+g.skylight_size):
-            ax.plot([xx, xx], [0, d], color=WOOD, lw=2.5)
-        ax.add_patch(Rectangle((x, g.skylight_y), g.skylight_size, g.skylight_size,
-                               facecolor=GLASS, edgecolor=WOOD, linewidth=3, zorder=4))
-        ax.text(x+g.skylight_size/2, g.skylight_y+g.skylight_size/2,
-                f"Lichtstraat {i}\n1.500 × 1.500 mm\n{p.skylight_mass:g} kg · 4 zijden",
-                ha="center", va="center", fontsize=9, zorder=5)
-    # Doorlopende muursteun langs de drie bevestigde randbalken.
-    ax.plot([-85, -85], [0, d], color=INK, lw=3, ls=":")
-    ax.plot([0, w], [-85, -85], color=INK, lw=3, ls=":")
-    ax.plot([w+85, w+85], [0, d+e], color=INK, lw=3, ls=":")
-    ax.scatter([0, w, w], [d, d, d+e], marker="^", s=90, color=INK, zorder=6)
-    ax.scatter([x0], [d+e], s=100, color=INK, zorder=6)
-    ax.scatter([x0], [d], marker="s", s=75, facecolor="white", edgecolor=INK, zorder=6)
-    ax.annotate("Kolom", (x0, d+e), xytext=(-12, 10), textcoords="offset points", ha="right", fontsize=9)
-    ax.annotate("B1", (w*.28, d), xytext=(0, 9), textcoords="offset points", ha="center", fontsize=10)
-    ax.annotate("B2", ((x0+w)/2, d+e), xytext=(0, 9), textcoords="offset points", ha="center", fontsize=10)
-    ax.annotate("B3", (x0, d+e*.5), xytext=(-10, 0), textcoords="offset points", ha="right", fontsize=10)
-    if highlight == "Langsbalken":
-        ax.annotate("R uit B3", (x0, d), xytext=(x0-750, d+400), fontsize=9,
-                    arrowprops={"arrowstyle": "->", "color": INK})
-    ax.set(xlim=(-350, w+350), ylim=(-400, d+e+400), aspect="equal",
-           xlabel="Binnengeometrie x [mm]", ylabel="Binnengeometrie y [mm]")
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.tick_params(labelsize=9)
-    return fig
-
-
-def draw_support_schemes(p: Parameters):
-    """Werkelijke invoer op horizontale schema's; steunpunttypes schematisch."""
-    s = p.spans
-    fig = Figure(figsize=(9, 4), layout="constrained")
-    axes = fig.subplots(3, 1)
-    rows = [("B1 · bovenste lange randbalk", s.upper_main, "Muur", "Muur"),
-            ("B2 · kleine bovenste lange randbalk", s.upper_extension, "Kolom", "Muur"),
-            ("B3 · kleine linker randbalk", s.left_extension, "Balkschoen op B1", "Kolom")]
-    for ax, (title, length, left, right) in zip(axes, rows):
-        ax.plot([0, length], [0, 0], color=WOOD, lw=5)
-        ax.scatter([0, length], [0, 0], marker="^", s=85, color=INK, zorder=3)
-        ax.text(0, -.28, left, ha="center", fontsize=9)
-        ax.text(length, -.28, right, ha="center", fontsize=9)
-        ax.text(length/2, -.58, f"Hart-op-hart: {length:,.0f} mm".replace(",", "."), ha="center", fontsize=10)
-        if title.startswith("B1"):
-            ax.annotate("R uit B3 (nog te berekenen)", (s.shoe_position, 0),
-                        xytext=(s.shoe_position, .62), ha="center", fontsize=9,
-                        arrowprops={"arrowstyle": "->", "color": INK})
-            ax.text(s.shoe_position, -.28, f"a = {s.shoe_position:g} mm", ha="center", fontsize=9)
-        ax.set_title(title, loc="left", fontsize=11)
-        ax.set(xlim=(-length*.18, length*1.18), ylim=(-.8, 1))
-        ax.axis("off")
-    return fig
-
-
-# ==================== STREAMLIT INTERFACE ====================
-import json
-from dataclasses import asdict
-
-import pandas as pd
-import streamlit as st
-
-
-st.set_page_config(page_title="Optimalisatie raveling Schinkel", layout="wide")
-g = Geometry()
-
-
-def section_input(label, default, key):
-    return st.selectbox(label, STANDARD_SECTIONS, index=STANDARD_SECTIONS.index(default),
-                        format_func=lambda x: f"{x[0]} × {x[1]} mm", key=key)
-
-
-def distance_input(label, value, key):
-    return st.number_input(label, min_value=1, value=value, step=10, key=key)
-
-
-with st.sidebar:
-    st.header("Ontwerpparameters")
-    strength = st.selectbox("Sterkteklasse Vuurhout", ["C24", "C18"], key="strength")
-    sheet = st.selectbox("Underlayment [mm]", [18, 22], key="sheet")
-    st.subheader("Dwarsbalken en raveling")
-    spacing = st.slider("Beoogde maximale h.o.h. [mm]", 300, 750, 600, 25, key="spacing")
-    joist = section_input("Dwarsbalk b × h", (63, 195), "joist")
-    trimmer = section_input("Ravelbalken b × h", (63, 195), "trimmer")
-    st.subheader("Vrij overspannende randbalken")
-    main_section = section_input("B1 · bovenste lange", (75, 245), "main_section")
-    upper_section = section_input("B2 · kleine bovenste lange", (75, 245), "upper_section")
-    left_section = section_input("B3 · kleine linker", (63, 195), "left_section")
-    with st.expander("Opleggingen en overspanningen [mm]", expanded=True):
-        bearing_left = st.number_input(
-            "Opleglengte links [mm]",min_value=1,value=150,step=10,key="bearing_left",)
-        bearing_right = st.number_input(
-            "Opleglengte rechts [mm]",
-            min_value=1,
-            value=150,
-            step=10,
-            key="bearing_right",
-        )
-
-        # B1 en B2: fysieke oplegging op muur / kolom.
-        b1_clear = distance_input(
-            "B1 · vrije binnenmaat", g.main_width, "b1_clear"
-        )
-        b2_clear = distance_input(
-            "B2 · vrije binnenmaat", g.extension_width, "b2_clear"
-        )
-
-        b1 = b1_clear + bearing_left / 2 + bearing_right / 2
-        b2 = b2_clear + bearing_left / 2 + bearing_right / 2
-
-        st.write(f"Oplegasafstand B1: **{b1:g} mm**")
-        st.write(f"Oplegasafstand B2: **{b2:g} mm**")
-
-        # Verbindingen met balkschoenen: voorlopig afzonderlijke invoer.
-        jm = distance_input(
-            "Dwarsbalk hoofddeel · oplegasafstand",
-            2824,
-            "span_joist_main",
-        )
-        je = distance_input(
-            "Dwarsbalk opbouw · oplegasafstand",
-            1220,
-            "span_joist_extension",
-        )
-        b3_clear = distance_input(
-            "B3 · vrije binnenmaat balkschoenzijde → kolom",
-            g.extension_depth,
-            "b3_clear",
-        )
-
-        # Dezelfde kolom als bij de linker oplegging van B2.
-        bearing_column = bearing_left
-
-        shoe_axis_offset = st.number_input(
-            "B3 · afstand aansluitvlak → oplegas balkschoen [mm]",
-            min_value=0,
-            value=0,
-            step=1,
-            key="b3_shoe_axis_offset",
-            help=(
-                "Voorlopig 0: oplegas op het aansluitvlak. "
-                "Later afstemmen op het aansluitdetail."
-            ),
-        )
-
-        b3 = (
-            b3_clear
-            + bearing_column / 2
-            + shoe_axis_offset
-        )
-
-        st.write(f"Oplegasafstand B3: **{b3:g} mm**")
-
-        shoe_from_inner_face = distance_input(
-            "Balkschoenpositie vanaf binnenzijde linker muur B1",
-            g.extension_x,
-            "shoe_from_inner_face",
-        )
-        shoe = shoe_from_inner_face + bearing_left / 2
-
-        st.caption(
-            f"Balkschoenpositie vanaf linker oplegas B1: {shoe:g} mm."
-        )
-
-p = Parameters(strength_class=strength, sheet_mm=sheet, spacing_mm=spacing,
-               joist_section=joist, main_section=main_section,
-               upper_section=upper_section, left_section=left_section,
-               trimmer_section=trimmer,
-               spans=Spans(jm, je, b1, b2, b3, shoe),
-               **st.session_state.get("project_loads", {}))
-
-st.title("Optimalisatie raveling Schinkel")
-st.caption("App-opzet · dwarsbalken en raveling → oplegreacties → randbalken")
-errors = validate(p)
-for error in errors:
-    st.error(error)
-if errors:
-    st.stop()
-
-# Afgesproken ontwerpvolgorde. Voeg de rekenregels toe bij design_joists en design_edge_beams.
-joist_results = design_joists(p, g)
-edge_results = design_edge_beams(p, joist_results)
-
-view = st.radio("Weergave", ["Dwarsbalken", "Langsbalken", "Belastingen", "Model / code"], horizontal=True)
-if view in ("Dwarsbalken", "Langsbalken"):
-    plot_col, info_col = st.columns([3, 2])
-    with plot_col:
-        st.subheader("Raveling · bovenaanzicht")
-        st.pyplot(draw_plan(p, g, view), width="stretch")
-        st.caption("B1/B2/B3: vrije randbalken · ● kolom · ▲ muuroplegging · "
-                   "□ balkschoen · stippellijn: doorlopende muursteun. Balkdiktes schematisch.")
-        st.caption("De plattegrond behoudt de binnenmaten. Gewijzigde oplegasafstanden staan "
-                   "in de oplegschema's; ze veranderen de dakvorm en lichtstraatposities niet.")
-    with info_col:
-        if view == "Dwarsbalken":
-            st.subheader("Keuze dwarsbalken")
-            st.metric("Doorsnede b × h", f"{joist[0]} × {joist[1]} mm")
-            st.metric("Beoogde maximale h.o.h.", f"{spacing} mm")
-            st.metric("Oplegasafstand hoofddeel", f"{jm} mm")
-            st.metric("Oplegasafstand opbouw", f"{je} mm")
-            st.caption("Tekening: gelijke veldverdeling met h.o.h. ≤ ingestelde waarde; "
-                       "vaste ravelbalken aanvullend. Geen definitief legplan.")
-            st.write("**UGT / BGT:**", joist_results["status"])
+    # Eerst alle doorgaande assen; later de korte balkjes en wissels.
+    full, short, headers, extension = [], [], [], []
+    side_names = {}
+    for index, (x, a, b) in enumerate(tributaries(m.main_x, 0, WIDTH)):
+        opening = next((j for j, ox in enumerate(OPEN_X)
+                        if ox < x < ox+OPEN_SIZE), None)
+        if index in (0, len(m.main_x)-1):
+            # Randstroken dragen direct naar doorlopend ondersteunde muurregel.
+            for case in CASES:
+                area_load = ROOF_DEAD + {18: .10, 22: .12}[p.sheet] + CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                m.wall_loads[case] += area_load*(b-a)*DEPTH/1000
+            continue
+        if opening is None:
+            name = f"D{index:02}"
+            beam = member(name, "Dwarsbalk", p.joist, DEPTH,
+                          (None, ("B1", x+left_offset)))
+            full.append(name)
+            for j, ox in enumerate(OPEN_X):
+                if abs(x-(ox-bw/2)) < 1e-5:
+                    side_names[j, "L"] = name
+                if abs(x-(ox+OPEN_SIZE+bw/2)) < 1e-5:
+                    side_names[j, "R"] = name
+            # Dakstrook minus de projectie van de twee vrije lichtstraatopeningen.
+            removed = sum(max(0.0, min(b, ox+OPEN_SIZE)-max(a, ox)) for ox in OPEN_X)
+            for case in CASES:
+                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                add_q(beam, case, surface*(b-a)/1000, 0, OPEN_Y)
+                add_q(beam, case, surface*(b-a-removed)/1000, OPEN_Y, OPEN_Y+OPEN_SIZE)
+                add_q(beam, case, surface*(b-a)/1000, OPEN_Y+OPEN_SIZE, DEPTH)
         else:
-            st.subheader("Keuze randbalken")
-            for name, section in [("B1", main_section), ("B2", upper_section), ("B3", left_section)]:
-                st.metric(name + " · b × h", f"{section[0]} × {section[1]} mm")
-            st.write("**UGT / BGT:**", edge_results["status"])
-            st.info("B1 ontvangt bij de opbouw dwarsbalkreacties van beide kanten "
-                    "én een geconcentreerde reactie uit B3 via de balkschoen.")
-        st.caption("Lichtstraten voorlopig op vier zijden opgelegd; lastverdeling nog bepalen.")
-    st.subheader("Oplegschema's · actuele invoer")
-    st.pyplot(draw_support_schemes(p), width="stretch")
-    st.caption("B3: van onder (balkschoen op B1) naar boven (kolom). "
-               "De balkschoen op B1 is een belastingpunt, geen extra ondersteuning van B1.")
-    st.subheader("Te vergelijken varianten")
-    st.dataframe(pd.DataFrame([
-        {"Variant": "Huidige keuze", "Dwarsbalk [mm]": f"{joist[0]} × {joist[1]}",
-         "H.o.h. [mm]": str(spacing), "UGT": "Nog niet berekend", "BGT": "Nog niet berekend"},
-        {"Variant": "Optimum", "Dwarsbalk [mm]": "—", "H.o.h. [mm]": "—",
-         "UGT": "Rekenmodel volgt", "BGT": "Rekenmodel volgt"},
-    ]), hide_index=True, width="stretch")
-    with st.expander("Vastgelegde opleggingen en geometrie"):
-        st.write("Onderste lange, rechter en linker randbalk: doorlopend aan muur bevestigd en ondersteund. "
-                 "Dit legt geen momentvaste inklemming vast. Muurbevestigingen krijgen later een eigen controle.")
-        st.write("B1: muur–muur. B2: kolom–muur. B3: balkschoen op B1–kolom.")
-        st.write("Hoofddeel: 5.480 × 2.824 mm. Opbouw: 2.455 × 1.220 mm. "
-                 "Lichtstraten: elk 1.500 × 1.500 mm. x-maatketen: 490 / 1.500 / 1.500 / 1.500 / 490 mm; "
-                 "y-maatketen: 662 / 1.500 / 662 mm.")
-        st.write("Ravelbalken, doorgaande balken naast openingen, verbindingen en doorlopend "
-                 "ondersteunde randbalken moeten in de volgende fase afzonderlijk worden uitgewerkt.")
-elif view == "Belastingen":
-    st.subheader("Belastingen · onbewerkte invoer")
-    st.caption("Waarden uit de projectuitgangspunten, nog geen normtoets of lastcombinatie.")
-    load_fields = [
-        ("roof_dead", "Dakbedekking + isolatie [kN/m²]", 0.01),
-        ("snow", "Sneeuw [kN/m²]", 0.01),
-        ("rain", "Regenwater [kN/m²]", 0.05),
-        ("maintenance_area", "Onderhoud vlaklast [kN/m²]", 0.05),
-        ("maintenance_point", "Onderhoud puntlast [kN]", 0.05),
-        ("skylight_mass", "Massa per lichtstraat [kg]", 5.0),
-    ]
-    for field_name, label, increment in load_fields:
-        setattr(p, field_name, st.number_input(label, min_value=0.0,
-                value=getattr(p, field_name), step=increment, key="load_" + field_name))
-    # Bewaar los van widget keys: Streamlit verwijdert verborgen widgets bij navigatie.
-    st.session_state["project_loads"] = {name: getattr(p, name) for name, _, _ in load_fields}
-    st.metric("Permanente daklagen", f"{p.roof_layers_dead:.2f} kN/m²")
-    st.caption("Exclusief eigen gewicht balken en lichtstraten. Underlayment: "
-               f"{p.sheet_dead:.2f} kN/m². Houtdichtheid en gewichtsafdracht volgen.")
-    st.info("Sneeuw, wateraccumulatie en onderhoud zijn afzonderlijke invoergegevens. "
-            "Combineren, gelijktijdigheid en plaatsing van puntlasten werken we later uit.")
-    st.session_state["project_simple_foundation"] = st.checkbox(
-        "Vereenvoudiging fundering opnemen: 1,5 m dakbreedte per meter zijbalk",
-        value=st.session_state.get("project_simple_foundation", False), key="simple_foundation")
-    st.caption("Nog geen funderingsreacties; opbouw en raveling apart afdragen. "
-               "Dakstroken niet dubbel tellen met berekende balkreacties.")
-else:
-    st.subheader("Verder coderen")
-    st.markdown("- `Geometry`, `Spans`, `Parameters`: projectinvoer.\n- `STANDARD_SECTIONS`: handelsmaten.\n"
-                "- `draw_plan`, `draw_support_schemes`: tekeningen.\n"
-                "- `design_joists`, `design_edge_beams`, `optimize`: toekomstige berekeningen.")
-    st.code("joists = design_joists(p, g)\nedges = design_edge_beams(p, joists)\n"
-            "result = optimize(p, g)", language="python")
-    st.json({"parameters": p.to_dict(), "geometry": asdict(g)})
+            for suffix, length, header, y_transfer in [
+                ("o", lower_axis, f"W{opening+1}o", None),
+                ("b", DEPTH-upper_axis, f"W{opening+1}b", None),
+            ]:
+                ox = OPEN_X[opening]
+                relative_x = x-(ox-bw/2)
+                receivers = ((None, (header, relative_x)) if suffix == "o"
+                             else ((header, relative_x), ("B1", x+left_offset)))
+                beam = member(f"D{index:02}{suffix}", "Korte dwarsbalk", p.joist,
+                              length, receivers)
+                short.append(beam.name)
+                # Hele dakprojectie (662 mm) aan de korte balk toekennen,
+                # ook de halve wisselbreedte: geen verloren/dubbele dakstrook.
+                projection = OPEN_Y if suffix == "o" else DEPTH-OPEN_Y-OPEN_SIZE
+                for case in CASES:
+                    surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                    add_q(beam, case, surface*(b-a)/1000*projection/length)
 
-st.download_button("Download huidige invoer (JSON)",
-                   json.dumps({"parameters": p.to_dict(), "geometry": asdict(g),
-                               "simple_foundation": st.session_state.get("project_simple_foundation", False)},
-                              ensure_ascii=False, indent=2),
-                   file_name="schinkel-invoer.json", mime="application/json")
+    # De 25% per rand wordt als lijnlast op de bijbehorende rand gezet.
+    for j, ox in enumerate(OPEN_X):
+        for suffix, axis in [("o", lower_axis), ("b", upper_axis)]:
+            name = f"W{j+1}{suffix}"
+            beam = member(name, "Ravelbalk", p.header, OPEN_SIZE+bw,
+                          ((side_names[j, "L"], axis), (side_names[j, "R"], axis)))
+            headers.append(name)
+            for case in CASES:
+                total = SKYLIGHT_KG*9.81 if case == "Permanent" else AREA_LOADS[case]*(OPEN_SIZE/1000)**2*1000
+                add_q(beam, case, total/4/OPEN_SIZE, bw/2, bw/2+OPEN_SIZE)
+        for side in ("L", "R"):
+            beam = m.beams[side_names[j, side]]
+            for case in CASES:
+                total = SKYLIGHT_KG*9.81 if case == "Permanent" else AREA_LOADS[case]*(OPEN_SIZE/1000)**2*1000
+                add_q(beam, case, total/4/OPEN_SIZE, OPEN_Y, OPEN_Y+OPEN_SIZE)
 
+    for i, (x, a, b) in enumerate(tributaries(m.ext_x, EXT_X, WIDTH)):
+        if i == len(m.ext_x)-1:
+            for case in CASES:
+                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+                m.wall_loads[case] += surface*(b-a)*EXT_DEPTH/1000
+            continue
+        if i == 0:
+            beam = B3
+        else:
+            beam = member(f"O{i:02}", "Dwarsbalk opbouw", p.joist, EXT_DEPTH,
+                          (("B1", x+left_offset), ("B2", x-EXT_X+left_offset)))
+            extension.append(beam.name)
+        for case in CASES:
+            surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else AREA_LOADS[case]
+            add_q(beam, case, surface*(b-a)/1000, 0, EXT_DEPTH)
+
+    # Doorlopend ondersteunde regels: eigen gewicht direct naar de muren.
+    m.wall_loads["Permanent"] += p.edge[0]*p.edge[1]*DENSITY*9.81/1e9*(WIDTH+DEPTH+DEPTH+EXT_DEPTH)
+    m.order = short+headers+full+extension+["B3", "B2", "B1"]
+    if len(m.order) != len(set(m.order)) or set(m.order) != set(m.beams):
+        raise ValueError("Interne fout in de volgorde van belastingafdracht.")
+    return m
+
+
+def analyze(p, keep_details=True):
+    m = build_model(p)
+    material = MATERIALS[p.strength]
+    # Invoerlasten vastleggen vóór reactiekrachten worden toegevoegd.
+    applied = {c: m.wall_loads[c]+sum(load_total(b.loads[c]) for b in m.beams.values()) for c in CASES}
+    terminal = dict(m.wall_loads)
+    rows = []
+    for name in m.order:
+        beam = m.beams[name]
+        b, h = beam.section
+        W, EI = b*h*h/6, material["E"]*b*h**3/12
+        calculated = {}
+        for case in CASES:
+            calculated[case] = response(beam.length, beam.loads[case])
+            for receiver, force in zip(beam.receivers,
+                                       (calculated[case]["left"], calculated[case]["right"])):
+                if receiver is None:
+                    terminal[case] += force
+                else:
+                    add_point(m.beams[receiver[0]], case, force, receiver[1])
+        G = calculated["Permanent"]
