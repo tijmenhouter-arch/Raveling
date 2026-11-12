@@ -507,6 +507,25 @@ def roof_strip(p, geometry, case, a, b, y0, y1, length):
 
     return loads
 
+def skylight_load(p, case):
+    """Totale karakteristieke belasting per raam, in N."""
+    if case == "Permanent":
+        return p.skylight_kg * 9.81
+
+    if case == "Sneeuw":
+        return (
+            p.snow
+            * (p.skylight_outer_mm / 1000) ** 2
+            * 1000
+        )
+
+    if case in ("Regenwater", "Onderhoud vlaklast"):
+        return 0.0
+
+    raise ValueError(
+        f"Onbekend lichtstraat-belastinggeval: {case}"
+    )
+
 def build_model(p):
     m = Model()
     area_loads = variable_loads(p)
@@ -618,7 +637,7 @@ def build_model(p):
                 bw / 2 + OPEN_SIZE,
             )
             for case in CASES:
-                total = p.skylight_kg*9.81 if case == "Permanent" else area_loads[case]* (g["outer"] / 1000) ** 2 * 1000
+                total = skylight_load(p, case)
                 add_q(beam, case, total/4/OPEN_SIZE, bw/2, bw/2+OPEN_SIZE)
         for side in ("L", "R"):
             beam = m.beams[side_names[j, side]]
@@ -631,7 +650,7 @@ def build_model(p):
                 OPEN_Y + OPEN_SIZE,
             )
             for case in CASES:
-                total = p.skylight_kg*9.81 if case == "Permanent" else area_loads[case]* (g["outer"] / 1000) ** 2 * 1000
+                total = skylight_load(p, case)
                 add_q(beam, case, total/4/OPEN_SIZE, OPEN_Y, OPEN_Y+OPEN_SIZE)
 
     for i, (x, a, b) in enumerate(tributaries(m.ext_x, EXT_X, WIDTH)):
@@ -1288,9 +1307,10 @@ def show_calculation_method(p, result):
         rf"={SKYLIGHT_KG * 9.81 / 4000:.4f}\;\mathrm{{kN}}"
     )
     st.write(
-        "Iedere framezijde ontvangt 25% van de lichtstraatlast, "
-        "gelijkmatig langs de openingrand. Ook de uniforme "
-        "variabele lichtstraatbelasting wordt zo verdeeld."
+        "Iedere framezijde ontvangt 25% van het raamgewicht "
+        "en van de sneeuwbelasting op het raam. "
+        "Regenwater en onderhoudsvlaklast worden uitsluitend "
+        "op het dak buiten de buitencontour van de ramen gerekend."
     )
 
     frame_length = 4 * OPEN_SIZE + 4 * p.header[0]
@@ -1326,12 +1346,11 @@ def show_calculation_method(p, result):
     )
 
     st.write(
-        "Permanent worden de daklagen buiten de "
-        "constructieve opening gerekend, plus raam- en "
-        "framegewicht. Variabele glasbelasting wordt "
-        "over de volledige buitenmaat gerekend. "
-        "De variabele dakbelasting wordt daar uitgezonderd, "
-        "zodat geen oppervlak dubbel wordt belast."
+        "Permanent worden de daklagen buiten de constructieve "
+        "opening gerekend, plus raam- en framegewicht. "
+        "Sneeuw wordt op dak én ramen gerekend. "
+        "Voor regenwater en onderhoudsvlaklast wordt de "
+        "volledige buitenmaat van beide ramen uitgesloten."
     )
 
     st.latex(
