@@ -42,16 +42,13 @@ from matplotlib.patches import Rectangle
 WIDTH, DEPTH = 5480.0, 2824.0
 EXT_WIDTH, EXT_DEPTH = 2455.0, 1220.0
 EXT_X = WIDTH - EXT_WIDTH
-OPEN_SIZE, OPEN_Y = 1500.0, 662.0
-OPEN_X = (490.0, 3490.0)
 ROOF_DEAD, CEILING_DEAD, DENSITY = 0.15, 0.15, 500.0
-SKYLIGHT_KG = 120.0  # inclusief constructie lichtstraat; opstand nog verifiëren
 AREA_LOADS = {"Sneeuw": 0.56, "Regenwater": 1.0, "Onderhoud vlaklast": 1.0}
 POINT_LOAD_N = 1500.0
 CASES = ("Permanent", *AREA_LOADS)
 SECTIONS = (
     (45, 145), (45, 170), (45, 195), (45, 220),
-    (63, 145), (63, 170), (63, 195), (63, 220), (63, 245),
+    (63, 145), (63, 170), (63, 195), (63, 220), (63, 245), (65, 175), (75, 175),
     (75, 195), (75, 220), (75, 245), (75, 270),
     (100, 220), (100, 245), (100, 270),
 )
@@ -70,7 +67,7 @@ class Parameters:
     spacing: int = 600
     joist: tuple[int, int] = (63, 195)
     edge: tuple[int, int] = (75, 245)
-    header: tuple[int, int] = (63, 195)
+    header: tuple[int, int] = (63, 300)
     bearing_left: int = 120
     bearing_right: int = 120
     extra_column: bool = False
@@ -79,6 +76,9 @@ class Parameters:
     rain: float = 1.0
     maintenance_area: float = 1.0
     maintenance_point: float = 1.5  # kN
+    skylight_kg: float = 80.0
+    skylight_inner_mm: int = 1200
+    skylight_outer_mm: int = 1400
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -336,6 +336,164 @@ def point_envelope(length, support):
     # Kleine toeslag vanwege bemonstering van de lastpositie.
     return max_moment * 1.001, max_deflection * 1.001
 
+# Middelpunten uit de oorspronkelijke tekening blijven vast.
+SKYLIGHT_CENTRES_X = (1240.0, 4240.0)
+SKYLIGHT_CENTRE_Y = 1412.0
+
+CURB_CLEARANCE_MM = 10.0
+CURB_MIN_ABOVE_ROOF_MM = 150.0
+
+# Aannames uitsluitend voor de hoogtetoets.
+ROOF_COVER_MM = 5.0
+INSULATION_MM = 100.0
+
+
+def skylight_geometry(p):
+    clear = float(p.skylight_inner_mm) + CURB_CLEARANCE_MM
+    outer = float(p.skylight_outer_mm)
+    frame_outer = clear + 2 * p.header[0]
+
+    if p.skylight_inner_mm <= 0 or p.skylight_kg < 0:
+        raise ValueError(
+            "Binnenmaat moet positief zijn; "
+            "gewicht mag niet negatief zijn."
+        )
+
+    if outer <= clear:
+        raise ValueError(
+            "De buitenmaat moet groter zijn "
+            "dan de vrije opstandopening."
+        )
+
+    if frame_outer > outer:
+        available = (outer - clear) / 2
+        raise ValueError(
+            f"Het houten opstandprofiel is te breed. "
+            f"Maximaal {available:g} mm per zijde past "
+            "binnen de glascontour, vóór isolatie en afwerking."
+        )
+
+    xs = tuple(
+        cx - clear / 2 for cx in SKYLIGHT_CENTRES_X
+    )
+    outer_xs = tuple(
+        cx - outer / 2 for cx in SKYLIGHT_CENTRES_X
+    )
+    y = SKYLIGHT_CENTRE_Y - clear / 2
+    outer_y = SKYLIGHT_CENTRE_Y - outer / 2
+
+    if (
+        min(outer_xs) < 0
+        or max(outer_xs) + outer > WIDTH
+        or outer_y < 0
+        or outer_y + outer > DEPTH
+    ):
+        raise ValueError(
+            "De buitenmaat past niet binnen het hoofddeel."
+        )
+
+    if outer_xs[0] + outer > outer_xs[1]:
+        raise ValueError(
+            "De buitencontouren van de lichtstraten overlappen."
+        )
+
+    if (
+        min(xs) - p.joist[0] / 2 <= 0
+        or max(xs) + clear + p.joist[0] / 2 >= WIDTH
+    ):
+        raise ValueError(
+            "De dwarsbalkprofielen passen niet "
+            "naast de gekozen opening."
+        )
+
+    roof_build_up = ROOF_COVER_MM + INSULATION_MM + p.sheet
+    above_roof = p.header[1] - roof_build_up
+
+    return dict(
+        size=clear,
+        x=xs,
+        y=y,
+        outer=outer,
+        outer_x=outer_xs,
+        outer_y=outer_y,
+        frame_outer=frame_outer,
+        frame_axis=clear + p.header[0],
+        roof_build_up=roof_build_up,
+        above_roof=above_roof,
+        minimum_height=(
+            roof_build_up + CURB_MIN_ABOVE_ROOF_MM
+        ),
+        height_ok=(
+            above_roof >= CURB_MIN_ABOVE_ROOF_MM
+        ),
+    )
+
+
+def roof_strip(p, geometry, case, a, b, y0, y1, length):
+    """Dakstrook als lijnlast, zonder dubbele glasbelasting.
+
+    Permanent: daklagen buiten de constructieve opening.
+    Variabel: dakvlak buiten de buitencontour van het glas.
+    Bij korte balken wordt de dakprojectie naar de oplegassen gemapt.
+    """
+    permanent = case == "Permanent"
+
+    size = (
+        geometry["size"] if permanent
+        else geometry["outer"]
+    )
+    xs = (
+        geometry["x"] if permanent
+        else geometry["outer_x"]
+    )
+    y = (
+        geometry["y"] if permanent
+        else geometry["outer_y"]
+    )
+
+    surface = (
+        ROOF_DEAD
+        + {18: 0.10, 22: 0.12}[p.sheet]
+        + CEILING_DEAD
+        if permanent
+        else variable_loads(p)[case]
+    )
+
+    cuts = sorted({
+        y0,
+        y1,
+        max(y0, min(y1, y)),
+        max(y0, min(y1, y + size)),
+    })
+
+    projection = y1 - y0
+    loads = []
+
+    for start, end in zip(cuts, cuts[1:]):
+        width = b - a
+
+        if y < (start + end) / 2 < y + size:
+            width -= sum(
+                max(0.0, min(b, x + size) - max(a, x))
+                for x in xs
+            )
+
+        q = (
+            surface
+            * max(0.0, width) / 1000
+            * projection / length
+        )
+
+        if q:
+            loads.append((
+                "q",
+                (start - y0) * length / projection,
+                (end - y0) * length / projection,
+                q,
+            ))
+
+    return loads
+
 def build_model(p):
     m = Model()
     area_loads = variable_loads(p)
@@ -343,6 +501,8 @@ def build_model(p):
     bw = p.joist[0]
     hw = p.header[0]
     left_offset, right_offset = p.bearing_left / 2, p.bearing_right / 2
+    g = skylight_geometry(p)
+    OPEN_SIZE, OPEN_X, OPEN_Y = g["size"], g["x"], g["y"]
 
     def member(name, group, section, length, receivers=(None, None)):
         beam = Beam(name, group, section, float(length), receivers)
@@ -375,8 +535,12 @@ def build_model(p):
         if index in (0, len(m.main_x)-1):
             # Randstroken dragen direct naar doorlopend ondersteunde muurregel.
             for case in CASES:
-                area_load = ROOF_DEAD + {18: .10, 22: .12}[p.sheet] + CEILING_DEAD if case == "Permanent" else area_loads[case]
-                m.wall_loads[case] += area_load*(b-a)*DEPTH/1000
+                m.wall_loads[case] += load_total(
+                    roof_strip(
+                        p, g, case,
+                        a, b, 0, DEPTH, DEPTH,
+                    )
+                )
             continue
         if opening is None:
             name = f"D{index:02}"
@@ -389,12 +553,13 @@ def build_model(p):
                 if abs(x-(ox+OPEN_SIZE+bw/2)) < 1e-5:
                     side_names[j, "R"] = name
             # Dakstrook minus de projectie van de twee vrije lichtstraatopeningen.
-            removed = sum(max(0.0, min(b, ox+OPEN_SIZE)-max(a, ox)) for ox in OPEN_X)
             for case in CASES:
-                surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
-                add_q(beam, case, surface*(b-a)/1000, 0, OPEN_Y)
-                add_q(beam, case, surface*(b-a-removed)/1000, OPEN_Y, OPEN_Y+OPEN_SIZE)
-                add_q(beam, case, surface*(b-a)/1000, OPEN_Y+OPEN_SIZE, DEPTH)
+                beam.loads[case].extend(
+                    roof_strip(
+                        p, g, case,
+                        a, b, 0, DEPTH, DEPTH,
+                    )
+                )
         else:
             for suffix, length, header, y_transfer in [
                 ("o", lower_axis, f"W{opening+1}o", None),
@@ -408,11 +573,19 @@ def build_model(p):
                               length, receivers)
                 short.append(beam.name)
                 # Hele dakprojectie (662 mm) aan de korte balk toekennen,
-                # ook de halve wisselbreedte: geen verloren/dubbele dakstrook.
-                projection = OPEN_Y if suffix == "o" else DEPTH-OPEN_Y-OPEN_SIZE
+                y0, y1 = (
+                    (0, OPEN_Y)
+                    if suffix == "o"
+                    else (OPEN_Y + OPEN_SIZE, DEPTH)
+                )
+
                 for case in CASES:
-                    surface = ROOF_DEAD+{18: .10, 22: .12}[p.sheet]+CEILING_DEAD if case == "Permanent" else area_loads[case]
-                    add_q(beam, case, surface*(b-a)/1000*projection/length)
+                    beam.loads[case].extend(
+                        roof_strip(
+                            p, g, case,
+                            a, b, y0, y1, length,
+                        )
+                    )
 
     # De 25% per rand wordt als lijnlast op de bijbehorende rand gezet.
     for j, ox in enumerate(OPEN_X):
@@ -432,7 +605,7 @@ def build_model(p):
                 bw / 2 + OPEN_SIZE,
             )
             for case in CASES:
-                total = SKYLIGHT_KG*9.81 if case == "Permanent" else area_loads[case]*(OPEN_SIZE/1000)**2*1000
+                total = p.skylight_kg*9.81 if case == "Permanent" else area_loads[case]* (g["outer"] / 1000) ** 2 * 1000
                 add_q(beam, case, total/4/OPEN_SIZE, bw/2, bw/2+OPEN_SIZE)
         for side in ("L", "R"):
             beam = m.beams[side_names[j, side]]
@@ -445,7 +618,7 @@ def build_model(p):
                 OPEN_Y + OPEN_SIZE,
             )
             for case in CASES:
-                total = SKYLIGHT_KG*9.81 if case == "Permanent" else area_loads[case]*(OPEN_SIZE/1000)**2*1000
+                total = p.skylight_kg*9.81 if case == "Permanent" else area_loads[case]* (g["outer"] / 1000) ** 2 * 1000
                 add_q(beam, case, total/4/OPEN_SIZE, OPEN_Y, OPEN_Y+OPEN_SIZE)
 
     for i, (x, a, b) in enumerate(tributaries(m.ext_x, EXT_X, WIDTH)):
@@ -608,10 +781,16 @@ def analyze(p, keep_details=True):
     bgt = max(r["bgt"] for r in rows)*(1+1e-4)
     volume = sum(b.section[0]*b.section[1]*b.length/1e9 for b in m.beams.values())
     volume += p.edge[0]*p.edge[1]*(WIDTH+2*DEPTH+EXT_DEPTH)/1e9
-    volume += (len(OPEN_X)* (4 * OPEN_SIZE + 4 * p.header[0])* p.header[0]* p.header[1]/ 1e9)
-    return dict(ugt=ugt, bgt=bgt, passed=ugt<=1 and bgt<=1, rows=rows,
-                volume=volume, balance=balance, applied=applied, terminal=terminal,
-                model=m if keep_details else None)
+    geometry = skylight_geometry(p)
+
+    volume += (len(SKYLIGHT_CENTRES_X) * (4 * geometry["size"] + 4 * p.header[0]) * p.header[0] * p.header[1] / 1e9)
+
+    return dict(ugt=ugt,bgt=bgt, passed=(
+            ugt <= 1
+            and bgt <= 1
+            and geometry["height_ok"]
+        ),
+        rows=rows, geometry=geometry, volume=volume, balance=balance, applied=applied, terminal=terminal, model=m if keep_details else None,)
 
 
 @st.cache_data(show_spinner=False, max_entries=12)
@@ -637,6 +816,8 @@ def optimize(p):
 
 # ==================== TEKENING ====================
 def draw_plan(p, model):
+    geometry = skylight_geometry(p)
+    OPEN_SIZE, OPEN_X, OPEN_Y = (geometry["size"],geometry["x"],geometry["y"],)
     """Binnengeometrie leidend; randbalkdiktes schematisch aan de buitenzijde."""
     fig = Figure(figsize=(12, 8), layout="constrained", facecolor="white")
     ax = fig.subplots()
@@ -661,16 +842,16 @@ def draw_plan(p, model):
     for i,ox in enumerate(OPEN_X,1):
         timber(ox,OPEN_Y-hw,OPEN_SIZE,hw,orange,z=4)
         timber(ox,OPEN_Y+OPEN_SIZE,OPEN_SIZE,hw,orange,z=4)
-        ax.add_patch(Rectangle((ox,OPEN_Y),OPEN_SIZE,OPEN_SIZE,
-                               facecolor=blue,edgecolor="#287cb0",lw=1.5,zorder=5))
-        # Rustige glasreflectie, geknipt op de lichtstraat.
+        margin = (geometry["outer"] - OPEN_SIZE) / 2
+
+        ax.add_patch(Rectangle((ox - margin, OPEN_Y - margin),geometry["outer"],geometry["outer"],facecolor=blue,edgecolor="#287cb0",lw=1.5,zorder=5,))
         glass = ax.patches[-1]
         for shift in (200,500):
             line, = ax.plot([ox-200+shift,ox+OPEN_SIZE+shift],
                             [OPEN_Y,OPEN_Y+OPEN_SIZE+200],color="white",alpha=.4,lw=18,zorder=6)
             line.set_clip_path(glass)
         ax.text(ox+OPEN_SIZE/2,OPEN_Y+OPEN_SIZE/2,
-                f"Lichtstraat {i}\n1.500 × 1.500 mm\n120 kg",
+                f"Lichtstraat {i}\nBinnen: {p.skylight_inner_mm} × {p.skylight_inner_mm}\n{p.skylight_kg:g} kg",
                 ha="center",va="center",color=ink,fontsize=10,fontweight="bold",zorder=7)
     # Apart opstandframe bovenop de bestaande balklaag.
     for ox in OPEN_X:
@@ -743,11 +924,18 @@ def draw_plan(p, model):
             ax.annotate("",(a,offset),(b,offset),arrowprops=dict(arrowstyle="<->",lw=.8,color=ink))
             ax.text((a+b)/2,offset+55,label or f"{b-a:g}",ha="center",va="bottom",fontsize=fs,color=ink)
 
-    chain=[0,490,1990,3490,4990,5480]
+    chain = [
+        0,
+        OPEN_X[0],
+        OPEN_X[0] + OPEN_SIZE,
+        OPEN_X[1],
+        OPEN_X[1] + OPEN_SIZE,
+        WIDTH,
+    ]
     for a,b in zip(chain,chain[1:]):
         dim(a,b,-290,fs=9)
     dim(0,WIDTH,-580,label="5.480 mm",fs=12)
-    for a,b in [(0,662),(662,2162),(2162,2824)]:
+    for a,b in [(0, OPEN_Y),(OPEN_Y, OPEN_Y + OPEN_SIZE),(OPEN_Y + OPEN_SIZE, DEPTH),]:
         dim(a,b,-300,True,fs=9)
     dim(0,DEPTH,-610,True,label="2.824 mm",fs=12)
     dim(EXT_X,WIDTH,DEPTH+EXT_DEPTH+360,label="2.455 mm",fs=12)
@@ -867,6 +1055,8 @@ def method_case(p, result, row, case):
 
 def draw_beam_minimap(p, model, selected):
     """Ligging uit hetzelfde balkenplan als de berekening."""
+    geometry = skylight_geometry(p)
+    OPEN_SIZE, OPEN_X, OPEN_Y = (geometry["size"],geometry["x"],geometry["y"],)
     def endpoints(name):
         if name == "B1":
             return (0, DEPTH), (WIDTH, DEPTH)
@@ -929,10 +1119,12 @@ def draw_beam_minimap(p, model, selected):
     ax = fig.subplots()
 
     for ox in OPEN_X:
+        margin = (geometry["outer"] - OPEN_SIZE) / 2
+
         ax.add_patch(Rectangle(
-            (ox, OPEN_Y),
-            OPEN_SIZE,
-            OPEN_SIZE,
+            (ox - margin, OPEN_Y - margin),
+            geometry["outer"],
+            geometry["outer"],
             facecolor="#d5edf8",
             edgecolor="#86a6ba",
             lw=1,
@@ -993,6 +1185,9 @@ def draw_beam_minimap(p, model, selected):
 
 
 def show_calculation_method(p, result):
+    geometry = skylight_geometry(p)
+    OPEN_SIZE, OPEN_X, OPEN_Y = (geometry["size"], geometry["x"], geometry["y"],)
+    SKYLIGHT_KG = p.skylight_kg
     st.markdown("### 1. Rekenmodel en belastingafdracht")
     st.write(
         "De dakbelasting wordt verdeeld over de werkelijke "
@@ -1105,6 +1300,47 @@ def show_calculation_method(p, result):
         "bevestigingen zijn nog niet gecontroleerd."
     )
 
+    st.markdown("### Maatvoering en hoogte opstand")
+
+    st.write(
+        f"Binnenmaat raam: {p.skylight_inner_mm} mm. "
+        f"Vrije opstandopening: {OPEN_SIZE:g} mm "
+        "(10 mm montagetolerantie totaal). "
+        f"Buitenmaat glas: {p.skylight_outer_mm} mm. "
+        f"Buitenmaat kaal houten frame: "
+        f"{geometry['frame_outer']:g} mm. "
+        f"H.o.h. frame: {geometry['frame_axis']:g} mm."
+    )
+
+    st.write(
+        "Permanent worden de daklagen buiten de "
+        "constructieve opening gerekend, plus raam- en "
+        "framegewicht. Variabele glasbelasting wordt "
+        "over de volledige buitenmaat gerekend. "
+        "De variabele dakbelasting wordt daar uitgezonderd, "
+        "zodat geen oppervlak dubbel wordt belast."
+    )
+
+    st.latex(
+        rf"h_{{vrij}}={p.header[1]}"
+        rf"-{ROOF_COVER_MM:g}"
+        rf"-{INSULATION_MM:g}"
+        rf"-{p.sheet}"
+        rf"={geometry['above_roof']:g}\;\mathrm{{mm}}"
+    )
+
+    st.write(
+        "Vereist minimaal 150 mm boven afgewerkt dak. "
+        f"Benodigde profielhoogte: "
+        f"{geometry['minimum_height']:g} mm. "
+        "Dakbedekking 5 mm en isolatie 100 mm zijn "
+        "rekenaannames voor deze hoogtetoets. "
+        "De permanente vlaklast blijft zoals ingevoerd. "
+        "Helling blijft op verzoek buiten het model. "
+        "Isolatie en afwerking in de opstandbreedte, "
+        "steunlatten en bevestigingen zijn nog "
+        "niet gedetailleerd."
+    )
     st.markdown("### 2. Casus: de maatgevende balk")
     choice = st.selectbox(
         "Casus",
@@ -1456,11 +1692,10 @@ def choose_section(label, default, key):
     choice = st.selectbox(
         label,
         [*SECTIONS, "Handmatig"],
-        index=SECTIONS.index(default),
-        format_func=lambda value: (
-            value
-            if isinstance(value, str)
-            else section_text(value)
+        index=(
+            SECTIONS.index(default)
+            if default in SECTIONS
+            else len(SECTIONS)
         ),
         key=key,
     )
@@ -1506,9 +1741,20 @@ def main():
         strength=st.selectbox("Sterkteklasse vurenhout",list(MATERIALS),key="strength")
         sheet=st.selectbox("Underlayment",[18,22],format_func=lambda x:f"{x} mm",key="sheet")
         spacing=st.slider("Maximale h.o.h. dwarsbalken [mm]",300,750,600,25,key="spacing")
-        joist=choose_section("Dwarsbalkprofiel",(63,195),"joist")
-        edge=choose_section("Randbalkprofiel",(75,245),"edge")
-        header=choose_section("Lichtstraat ravelprofiel",(63,195),"header")
+        joist=choose_section("Dwarsbalkprofiel",(65,175),"joist")
+        edge=choose_section("Randbalkprofiel",(75,175),"edge")
+        header=choose_section("Lichtstraat ravelprofiel",(63,300),"header")
+        with st.expander("Lichtstraten · per stuk",expanded=True,):
+            skylight_kg = st.number_input("Gewicht [kg]",min_value=0.0,value=80.0,step=1.0,key="skylight_kg",)
+            skylight_inner_mm = st.number_input("Binnenmaat vierkant raam [mm]",min_value=100,value=1200,step=10,key="skylight_inner_mm",)
+            skylight_outer_mm = st.number_input("Buitenmaat vierkant raam [mm]",min_value=100,value=1400,step=10, key="skylight_outer_mm",
+            )
+
+            st.caption(
+                "Twee identieke ramen. Opstandopening = "
+                "binnenmaat + 10 mm. Hoogtetoets: 5 mm "
+                "dakbedekking + 100 mm isolatie + underlayment."
+            )
         with st.expander("Variabele belastingen", expanded=False):
             snow = st.number_input("Sneeuw [kN/m²]", min_value=0.0, value=0.56, step=0.01, key="snow",)
             rain = st.number_input("Regenwater [kN/m²]", min_value=0.0,value=1.0,step=0.05,key="rain",)
@@ -1520,14 +1766,16 @@ def main():
             key="extra_column",
         )
 
-    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point)
+    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,)
     st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
     except (ValueError, ArithmeticError) as exc:
         st.error(str(exc))
         return
-    st.pyplot(draw_plan(p,result["model"]),width="stretch")
+    plot_col, info_col = st.columns([3,1])
+    with plot_col:
+        st.pyplot(draw_plan(p,result["model"]),width="stretch")
     st.caption("Lichtbruin: dwarsbalken · oranje: randbalken en wissels · blauw: lichtstraten")
     a,b,c=st.columns([1,1,1.4])
     a.metric("UGT · buiging",f"{result['ugt']:.2f}")
@@ -1539,8 +1787,22 @@ def main():
     worst_b=max(result["rows"],key=lambda r:r["bgt"])
     st.caption(f"Bepalend UGT: {worst_u['name']} ({worst_u['ugt_case']}) · "
                f"Bepalend BGT: {worst_b['name']} ({worst_b['bgt_case']})")
-    st.info("Deelcontrole van buiging en einddoorbuiging per balk. Verbindingen, afschuiving, "
-            "stabiliteit en doorbuiging van de totale gekoppelde dakconstructie zijn nog niet getoetst.")
+    #st.info("Deelcontrole van buiging en einddoorbuiging per balk. Verbindingen, afschuiving, "
+            #"stabiliteit en doorbuiging van de totale gekoppelde dakconstructie zijn nog niet getoetst.")
+    geometry = result["geometry"]
+
+    st.caption(
+        "Vrije opstandhoogte boven afgewerkt dak: "
+        f"{geometry['above_roof']:g} mm; "
+        "vereist minimaal 150 mm."
+    )
+
+    if not geometry["height_ok"]:
+        st.error(
+            "Opstandprofiel te laag. "
+            f"Minimaal {geometry['minimum_height']:g} mm "
+            "profielhoogte nodig bij de aangenomen dakopbouw."
+        )
 
     if mode=="Optimalisatie":
         st.subheader("Goedgekeurde combinaties · deelcontrole")
