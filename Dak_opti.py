@@ -80,6 +80,10 @@ class Parameters:
     skylight_inner_mm: int = 1200
     skylight_outer_mm: int = 1400
     skylight_edge_distance_mm: int = 540
+    third_skylight: bool = False
+    b1_material: str = "Hout"
+    b1_steel_profile: str = "HEB 160"
+    steel_deflection_denominator: int = 300
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -346,6 +350,128 @@ CURB_MIN_ABOVE_ROOF_MM = 150.0
 ROOF_COVER_MM = 5.0
 INSULATION_MM = 100.0
 
+# Profielwaarden ArcelorMittal Sales Programme 2024-2, p. 60-61.
+# h [mm], b [mm], massa [kg/m], A [cm2], Iy [cm4], Wel,y [cm3].
+_STEEL_ROWS = {
+    "HEA 100": (96, 100, 16.7, 21.2, 349.2, 72.75),
+    "HEA 120": (114, 120, 19.9, 25.3, 606.1, 106.3),
+    "HEA 140": (133, 140, 24.7, 31.4, 1033, 155.3),
+    "HEA 160": (152, 160, 30.4, 38.8, 1672, 220.1),
+    "HEA 180": (171, 180, 35.5, 45.3, 2510, 293.6),
+    "HEA 200": (190, 200, 42.3, 53.8, 3692, 388.6),
+    "HEB 100": (100, 100, 20.4, 26.0, 449.5, 89.9),
+    "HEB 120": (120, 120, 26.7, 34.0, 864.3, 144.0),
+    "HEB 140": (140, 140, 33.7, 43.0, 1509, 215.6),
+    "HEB 160": (160, 160, 42.6, 54.3, 2491, 311.4),
+    "HEB 180": (180, 180, 51.2, 65.3, 3831, 425.6),
+    "HEB 200": (200, 200, 61.3, 78.1, 5696, 569.6),
+}
+STEEL_SECTIONS = {
+    name: dict(h=h, b=b, mass=mass, A=A*100, I=I*1e4, W=W*1e3)
+    for name, (h, b, mass, A, I, W) in _STEEL_ROWS.items()
+}
+
+
+def beam_properties(p, beam):
+    if beam.name == "B1" and p.b1_material == "Staal":
+        s = STEEL_SECTIONS[p.b1_steel_profile]
+        return dict(**s, E=210000.0, fm=235.0, gamma_m=1.0,
+                    kmod_g=1.0, kmod_q=1.0, kdef=0.0,
+                    limit_ratio=1/p.steel_deflection_denominator,
+                    label=p.b1_steel_profile, material="S235", steel=True)
+    b, h = beam.section
+    mat = MATERIALS[p.strength]
+    return dict(A=b*h, I=b*h**3/12, W=b*h*h/6, E=mat["E"], fm=mat["fm"],
+                gamma_m=PROFILE["gamma_m"], kmod_g=PROFILE["kmod_g"],
+                kmod_q=PROFILE["kmod_q"], kdef=PROFILE["kdef"],
+                limit_ratio=PROFILE["limit_ratio"], label=section_text(beam.section),
+                material=p.strength, steel=False)
+
+
+def show_steel_case(p, result, row, case, c):
+    """Staalcasus: eigen profielwaarden, geen houtformules."""
+    beam = c["beam"]
+    props = beam_properties(p, beam)
+    st.pyplot(draw_beam_minimap(p, result["model"], beam.name), width="content")
+    st.write(f"**B1 · {props['label']} · S235 · sterke-asbuiging**")
+    st.warning("Deelcontrole op elastische buiging en directe doorbuiging. "
+               "Kip, afschuiving en de interactie daarvan met buiging, verbindingen "
+               "en opleggingen zijn nog niet getoetst. Dit is geen volledige staalcontrole.")
+    st.write(f"Maatgevend scenario: **{case['case']}**. "
+             f"Afstand tussen buitenste oplegassen: **{beam.length:g} mm**.")
+    if c["support"] is not None:
+        st.write(f"Extra kolom op {c['support']:g} mm vanaf de linker oplegas; "
+                 "B1 is doorgaand over deze kolom.")
+    st.dataframe(pd.DataFrame([
+        {"Eigenschap": "A", "Waarde": c["A"], "Eenheid": "mm²"},
+        {"Eigenschap": "Iy", "Waarde": c["I"], "Eenheid": "mm⁴"},
+        {"Eigenschap": "Wel,y", "Waarde": c["W"], "Eenheid": "mm³"},
+        {"Eigenschap": "E", "Waarde": c["E"], "Eenheid": "N/mm²"},
+        {"Eigenschap": "fy", "Waarde": c["fm"], "Eenheid": "N/mm²"},
+        {"Eigenschap": "Massa", "Waarde": props["mass"], "Eenheid": "kg/m"},
+    ]), hide_index=True, width="stretch")
+    loads = []
+    for origin, items in (("Permanent", c["G"]), ("Variabel", c["Q"])):
+        for kind, a, b, value in items:
+            loads.append({"Herkomst": origin, "Type": "Puntlast" if kind=="P" else "Lijnlast",
+                          "Begin / positie [mm]": a, "Eind [mm]": b,
+                          "Waarde": value/1000 if kind=="P" else value,
+                          "Eenheid": "kN" if kind=="P" else "kN/m"})
+    st.dataframe(pd.DataFrame(loads), hide_index=True, width="stretch")
+    st.write(f"Totale permanente last op B1: {load_total(c['G'])/1000:.4f} kN. "
+             f"Totale variabele lijn- en puntreacties: {load_total(c['Q'])/1000:.4f} kN.")
+    if c["point_case"]:
+        st.caption("Bij de onderhoudspuntlast is bovenstaande variabele som niet "
+                   "de lokale enveloplast. Daarvoor wordt apart één volledige "
+                   f"puntlast van {p.maintenance_point:g} kN beschouwd.")
+    else:
+        st.dataframe(pd.DataFrame([
+            {"Combinatie": "UGT", "Links [kN]": c["design"]["left"]/1000,
+             "Rechts [kN]": c["design"]["right"]/1000,
+             "Extra kolom [kN]": c["design"]["middle"]/1000},
+            {"Combinatie": "BGT", "Links [kN]": c["service"]["left"]/1000,
+             "Rechts [kN]": c["service"]["right"]/1000,
+             "Extra kolom [kN]": c["service"]["middle"]/1000},
+        ]), hide_index=True, width="stretch")
+        fig = Figure(figsize=(8, 4.5), layout="constrained")
+        ax_m, ax_u = fig.subplots(2, 1)
+        ax_m.plot(c["design"]["x"], c["design"]["M"]/1e6)
+        ax_m.set(ylabel="MEd [kNm]")
+        ax_u.plot(c["service"]["x"], c["service"]["uEI"]/(c["E"]*c["I"]))
+        ax_u.set(xlabel="Vanaf linker oplegas [mm]", ylabel="u [mm]")
+        for ax in (ax_m, ax_u):
+            ax.axhline(0, color="grey", lw=.6)
+            ax.grid(alpha=.2)
+        st.pyplot(fig, width="stretch")
+    st.write("Lastposities zijn gemeten vanaf de linker oplegas van B1. "
+             "De reacties van de houten dwarsbalken, wissels en B3 worden "
+             "ongewijzigd overgedragen; alleen het eigen gewicht en de eigenschappen "
+             "van B1 veranderen.")
+    gamma_q = 0.0 if c["only_g"] else PROFILE["gamma_q"]
+    st.latex(rf"E_d={c['gamma_g']:.2f}G_k+{gamma_q:.2f}Q_k")
+    if c["point_case"]:
+        st.latex(r"M_{Ed,envelop}=\gamma_G\max|M_G|+\gamma_QP_k\max|M_{P=1N}|")
+        st.write(f"Lokale conservatieve envelop met Pk = {p.maintenance_point:g} kN; "
+                 "moment en doorbuiging hoeven niet bij dezelfde lastpositie op te treden.")
+    st.latex(rf"M_{{el,Rd}}=\frac{{W_{{el,y}}f_y}}{{\gamma_{{M0}}}}"
+             rf"={c['W']*c['strength']/1e6:.3f}\;\mathrm{{kNm}}")
+    st.latex(rf"\eta_{{UGT}}=\frac{{M_{{Ed}}}}{{M_{{el,Rd}}}}"
+             rf"=\frac{{{c['M']/1e6:.3f}}}{{{c['W']*c['strength']/1e6:.3f}}}={c['ugt']:.3f}")
+    st.write("Er wordt elastisch getoetst met Wel,y. De geselecteerde profielen "
+             "hebben bij S235 een geschikte doorsnedeklasse voor deze buigtoets. "
+             "De weerstand geldt voor de doorsnede; de kipweerstand kan lager zijn.")
+    st.latex(r"u(x)=u_G(x)+u_Q(x),\qquad k_{def,staal}=0")
+    if c["point_case"]:
+        st.latex(r"u_{envelop}=\max|u_G|+P_k\max|u_{P=1N}|")
+    st.write(f"Doorbuiging: **{c['u']:.3f} mm**. "
+             f"Grens: **{row['limit']:.3f} mm** "
+             f"(L/{p.steel_deflection_denominator}; "
+             "bij een extra kolom wordt conservatief het kortste veld gebruikt).")
+    st.latex(rf"\eta_{{BGT}}=\frac{{{c['u']:.3f}}}{{{row['limit']:.3f}}}={c['bgt']:.3f}")
+    st.caption("De doorbuigingsgrens is een voorlopige projecteis, geen automatische "
+               "Eurocodegrens. Afwerking, glas en vervorming van de totale gekoppelde "
+               "constructie vragen een afzonderlijke beoordeling. Geen zeeg aangenomen.")
+
 
 def skylight_geometry(p):
     clear = float(p.skylight_inner_mm) + CURB_CLEARANCE_MM
@@ -390,8 +516,25 @@ def skylight_geometry(p):
         WIDTH - distance - outer / 2,
     )
 
+    if p.third_skylight:
+        if 2 * distance + 3 * outer >= WIDTH:
+            raise ValueError(
+                "Het derde raam past niet met tussenruimte tussen raam 1 en 2. "
+                f"De afstand tot de dakrand moet kleiner zijn dan "
+                f"{(WIDTH - 3 * outer)/2:g} mm bij deze buitenmaat."
+            )
+        # Nummering blijft 1 links, 2 rechts en 3 midden.
+        centres_x = (*centres_x, WIDTH / 2)
+
     xs = tuple(cx - clear / 2 for cx in centres_x)
     outer_xs = tuple(cx - outer / 2 for cx in centres_x)
+    ordered_openings = sorted(xs)
+    if any(b - (a + clear) < 2 * p.joist[0] - 1e-6
+           for a, b in zip(ordered_openings, ordered_openings[1:])):
+        raise ValueError(
+            "Tussen de raamopeningen is onvoldoende ruimte voor twee "
+            f"doorgaande dwarsbalken van {p.joist[0]:g} mm breed."
+        )
     y = SKYLIGHT_CENTRE_Y - clear / 2
     outer_y = SKYLIGHT_CENTRE_Y - outer / 2
 
@@ -405,7 +548,8 @@ def skylight_geometry(p):
             "De buitenmaat past niet binnen het hoofddeel."
         )
 
-    if outer_xs[0] + outer > outer_xs[1]:
+    ordered = sorted(outer_xs)
+    if any(a + outer > b for a, b in zip(ordered, ordered[1:])):
         raise ValueError(
             "De buitencontouren van de lichtstraten overlappen."
         )
@@ -537,10 +681,16 @@ def build_model(p):
     OPEN_SIZE, OPEN_X, OPEN_Y = g["size"], g["x"], g["y"]
 
     def member(name, group, section, length, receivers=(None, None)):
+        if name == "B1" and p.b1_material == "Staal":
+            steel = STEEL_SECTIONS[p.b1_steel_profile]
+            section = (steel["b"], steel["h"])
         beam = Beam(name, group, section, float(length), receivers)
         m.beams[name] = beam
         # Eigen gewicht in N/mm. Halfopleggingen buiten het vrije veld inbegrepen.
-        add_q(beam, "Permanent", section[0]*section[1]*DENSITY*9.81/1e9)
+        own_weight = (STEEL_SECTIONS[p.b1_steel_profile]["mass"] * 9.81 / 1000
+                      if name == "B1" and p.b1_material == "Staal"
+                      else section[0]*section[1]*DENSITY*9.81/1e9)
+        add_q(beam, "Permanent", own_weight)
         return beam
 
     B1 = member("B1", "Randbalk", p.edge, WIDTH+left_offset+right_offset)
@@ -676,16 +826,15 @@ def build_model(p):
         raise ValueError("Interne fout in de volgorde van belastingafdracht.")
     return m
 
-
 def analyze(p, keep_details=True):
     m = build_model(p)
-    material = MATERIALS[p.strength]
     # Invoerlasten vastleggen vóór reactiekrachten worden toegevoegd.
     applied = {c: m.wall_loads[c]+sum(load_total(b.loads[c]) for b in m.beams.values()) for c in CASES}
     terminal = dict(m.wall_loads)
     rows = []
     for name in m.order:
         beam = m.beams[name]
+        props = beam_properties(p, beam)
         support = column_axis(p) if name == "B1" else None
 
         reference_length = (
@@ -693,9 +842,9 @@ def analyze(p, keep_details=True):
             if support is not None
             else beam.length
         )
-        limit = PROFILE["limit_ratio"] * reference_length
+        limit = props["limit_ratio"] * reference_length
         b, h = beam.section
-        W, EI = b*h*h/6, material["E"]*b*h**3/12
+        W, EI = props["W"], props["E"]*props["I"]
         calculated = {}
         for case in CASES:
             calculated[case] = response(beam.length, beam.loads[case], support)
@@ -713,17 +862,17 @@ def analyze(p, keep_details=True):
             # Analyse van de gecombineerde lasten houdt de werkelijke posities vast.
             if case == "Permanent":
                 M = PROFILE["gamma_g_only"]*G["maxM"]
-                u = (1+PROFILE["kdef"])*G["maxuEI"]/EI
-                kmod = PROFILE["kmod_g"]
+                u = (1+props["kdef"])*G["maxuEI"]/EI
+                kmod = props["kmod_g"]
             else:
                 design_loads = [(kind,a,z,v*PROFILE["gamma_g"]) for kind,a,z,v in beam.loads["Permanent"]]
                 design_loads += [(kind,a,z,v*PROFILE["gamma_q"]) for kind,a,z,v in beam.loads[case]]
-                service_loads = [(kind,a,z,v*(1+PROFILE["kdef"])) for kind,a,z,v in beam.loads["Permanent"]]
-                service_loads += [(kind,a,z,v*(1+PROFILE["kdef"]*PROFILE["psi2"])) for kind,a,z,v in beam.loads[case]]
+                service_loads = [(kind,a,z,v*(1+props["kdef"])) for kind,a,z,v in beam.loads["Permanent"]]
+                service_loads += [(kind,a,z,v*(1+props["kdef"]*PROFILE["psi2"])) for kind,a,z,v in beam.loads[case]]
                 M = response(beam.length, design_loads, support)["maxM"]
                 u = response(beam.length, service_loads, support)["maxuEI"]/EI
-                kmod = PROFILE["kmod_q"]
-            strength = kmod*material["fm"]/PROFILE["gamma_m"]
+                kmod = props["kmod_q"]
+            strength = kmod*props["fm"]/props["gamma_m"]
             records.append(dict(case=case, moment=M/1e6, deflection=u,
                                 ugt=M/W/strength,
                                 bgt=u/limit))
@@ -749,7 +898,7 @@ def analyze(p, keep_details=True):
                     ]
 
                     service = [
-                        (k, a, z, v * (1 + PROFILE["kdef"]))
+                        (k, a, z, v * (1 + props["kdef"]))
                         for k, a, z, v
                         in beam.loads["Permanent"]
                     ]
@@ -757,7 +906,7 @@ def analyze(p, keep_details=True):
                         (
                             k, a, z,
                             v * (
-                                1 + PROFILE["kdef"]
+                                1 + props["kdef"]
                                 * PROFILE["psi2"]
                             )
                         )
@@ -780,7 +929,7 @@ def analyze(p, keep_details=True):
                     ))
         # Eén puntlastenvelop per los onderdeel. Dit zijn bovenbegrenzingen:
         # max(G+P) <= max(G)+max(P), zonder te doen alsof pieken samenvallen.
-        strength = PROFILE["kmod_q"]*material["fm"]/PROFILE["gamma_m"]
+        strength = props["kmod_q"]*props["fm"]/props["gamma_m"]
         point_M, point_uEI = point_envelope(
             beam.length, support
         )
@@ -791,7 +940,7 @@ def analyze(p, keep_details=True):
         )
 
         u = (
-            (1 + PROFILE["kdef"]) * G["maxuEI"] / EI
+            (1 + props["kdef"]) * G["maxuEI"] / EI
             + (p.maintenance_point * 1000) * point_uEI / EI
         )
         records.append(dict(case="Onderhoud puntlast · envelop", moment=M/1e6,
@@ -799,7 +948,7 @@ def analyze(p, keep_details=True):
                             bgt=u/limit))
         worst_u = max(records, key=lambda r:r["ugt"])
         worst_b = max(records, key=lambda r:r["bgt"])
-        rows.append(dict(name=name, group=beam.group, section=section_text(beam.section),
+        rows.append(dict(name=name, group=beam.group, section=props["label"], material=props["material"],
                          length=beam.length, ugt=worst_u["ugt"], bgt=worst_b["bgt"],
                          ugt_case=worst_u["case"], bgt_case=worst_b["case"],
                          deflection=worst_b["deflection"],
@@ -811,7 +960,8 @@ def analyze(p, keep_details=True):
     # Kleine marge voor de numerieke evaluatie van de doorbuiging.
     ugt = max(r["ugt"] for r in rows)
     bgt = max(r["bgt"] for r in rows)*(1+1e-4)
-    volume = sum(b.section[0]*b.section[1]*b.length/1e9 for b in m.beams.values())
+    volume = sum(b.section[0]*b.section[1]*b.length/1e9 for b in m.beams.values()
+                 if not (b.name == "B1" and p.b1_material == "Staal"))
     volume += p.edge[0]*p.edge[1]*(WIDTH+2*DEPTH+EXT_DEPTH)/1e9
     geometry = skylight_geometry(p)
 
@@ -824,11 +974,10 @@ def analyze(p, keep_details=True):
         ),
         rows=rows, geometry=geometry, volume=volume, balance=balance, applied=applied, terminal=terminal, model=m if keep_details else None,)
 
-
 @st.cache_data(show_spinner=False, max_entries=12)
 def optimize(p):
     """Discrete zoekactie: dwarsbalkprofiel × maximale h.o.h.
-
+@st.cache_data
     Randbalk- en ravelprofiel blijven zoals in de zijbalk gekozen. Alle in het
     model berekende balken moeten slagen voor de twee geïmplementeerde toetsen.
     """
@@ -838,6 +987,10 @@ def optimize(p):
     for section in candidates:
         for spacing in SPACINGS:
             trial = replace(p, joist=section, spacing=spacing)
+            try:
+                skylight_geometry(trial)
+            except ValueError:
+                continue
             result = analyze(trial, keep_details=False)
             if result["passed"]:
                 approved.append(dict(section=section, spacing=spacing,
@@ -911,10 +1064,10 @@ def draw_plan(p, model):
     ax.annotate(
         "Opstandframe\nbovenop balklaag",
         (
-            OPEN_X[0] + OPEN_SIZE + hw / 2,
-            OPEN_Y + OPEN_SIZE / 2,
+            OPEN_X[0] + OPEN_SIZE / 2,
+            OPEN_Y + OPEN_SIZE + hw / 2,
         ),
-        xytext=(2740, OPEN_Y + OPEN_SIZE / 2),
+        xytext=(OPEN_X[0] + OPEN_SIZE / 2, OPEN_Y + OPEN_SIZE + 330),
         ha="center",
         va="center",
         fontsize=9,
@@ -930,7 +1083,12 @@ def draw_plan(p, model):
     timber(-ew,-ew,WIDTH+2*ew,ew,orange,z=8)
     timber(-ew,0,ew,DEPTH,orange,z=8)
     timber(WIDTH,0,ew,DEPTH+EXT_DEPTH+ew,orange,z=8)
-    timber(0,DEPTH,WIDTH,ew,orange,z=8)
+    if p.b1_material == "Staal":
+        steel_b = STEEL_SECTIONS[p.b1_steel_profile]["b"]
+        timber(0, DEPTH+ew/2-steel_b/2, WIDTH, steel_b,
+               color="#697f92", edge="#354958", z=8)
+    else:
+        timber(0,DEPTH,WIDTH,ew,orange,z=8)
     timber(EXT_X-ew,DEPTH+ew,ew,EXT_DEPTH-ew,orange,z=8)
     timber(EXT_X,DEPTH+EXT_DEPTH,EXT_WIDTH,ew,orange,z=8)
     # Ondersteuningen: muur langs onder/links/rechts, kolom bij opbouw.
@@ -940,7 +1098,8 @@ def draw_plan(p, model):
     ax.scatter([EXT_X-ew/2],[DEPTH+EXT_DEPTH],s=55,color=ink,zorder=9)
     ax.annotate("Kolom",(EXT_X-ew/2,DEPTH+EXT_DEPTH),xytext=(-12,14),
                 textcoords="offset points",ha="right",fontsize=9,color=ink)
-    ax.text(WIDTH*.38,DEPTH+ew+55,"B1",ha="center",fontsize=10,color=ink)
+    ax.text(WIDTH*.38,DEPTH+ew+55,
+            "B1 · " + p.b1_steel_profile if p.b1_material == "Staal" else "B1",ha="center",fontsize=10,color=ink)
     ax.text(EXT_X+EXT_WIDTH*.5,DEPTH+EXT_DEPTH+ew+55,"B2",ha="center",fontsize=10,color=ink)
     ax.text(EXT_X-ew-65,DEPTH+EXT_DEPTH*.5,"B3",ha="right",fontsize=10,color=ink)
 
@@ -956,14 +1115,9 @@ def draw_plan(p, model):
             ax.annotate("",(a,offset),(b,offset),arrowprops=dict(arrowstyle="<->",lw=.8,color=ink))
             ax.text((a+b)/2,offset+55,label or f"{b-a:g}",ha="center",va="bottom",fontsize=fs,color=ink)
 
-    chain = [
-        0,
-        OPEN_X[0],
-        OPEN_X[0] + OPEN_SIZE,
-        OPEN_X[1],
-        OPEN_X[1] + OPEN_SIZE,
-        WIDTH,
-    ]
+    chain = sorted([0, WIDTH, *(
+        value for ox in OPEN_X for value in (ox, ox + OPEN_SIZE)
+    )])
     for a,b in zip(chain,chain[1:]):
         dim(a,b,-290,fs=9)
     dim(0,WIDTH,-580,label="5.480 mm",fs=12)
@@ -984,15 +1138,16 @@ def draw_plan(p, model):
     ax.axis("off")
     return fig
 
+
 def method_case(p, result, row, case):
     """Reconstrueer hetzelfde lastgeval als de controleberekening."""
     beam = result["model"].beams[row["name"]]
     support = column_axis(p) if beam.name == "B1" else None
 
     b, h = beam.section
-    material = MATERIALS[p.strength]
-    E, fm = material["E"], material["fm"]
-    A, W, I = b * h, b * h**2 / 6, b * h**3 / 12
+    props = beam_properties(p, beam)
+    E, fm = props["E"], props["fm"]
+    A, W, I = props["A"], props["W"], props["I"]
 
     G = beam.loads["Permanent"]
     point_case = case["case"].startswith("Onderhoud puntlast")
@@ -1013,8 +1168,8 @@ def method_case(p, result, row, case):
         if only_g else PROFILE["gamma_g"]
     )
     kmod = (
-        PROFILE["kmod_g"]
-        if only_g else PROFILE["kmod_q"]
+        props["kmod_g"]
+        if only_g else props["kmod_q"]
     )
 
     design = [
@@ -1027,13 +1182,13 @@ def method_case(p, result, row, case):
     ]
 
     service = [
-        (k, a, z, v * (1 + PROFILE["kdef"]))
+        (k, a, z, v * (1 + props["kdef"]))
         for k, a, z, v in G
     ]
     service += [
         (
             k, a, z,
-            v * (1 + PROFILE["kdef"] * PROFILE["psi2"])
+            v * (1 + props["kdef"] * PROFILE["psi2"])
         )
         for k, a, z, v in Q
     ]
@@ -1057,12 +1212,12 @@ def method_case(p, result, row, case):
             + PROFILE["gamma_q"] * P * unit_M
         )
         u = (
-            (1 + PROFILE["kdef"])
+            (1 + props["kdef"])
             * g_response["maxuEI"] / (E * I)
             + P * unit_u / (E * I)
         )
 
-    strength = kmod * fm / PROFILE["gamma_m"]
+    strength = kmod * fm / props["gamma_m"]
 
     return dict(
         beam=beam,
@@ -1383,6 +1538,9 @@ def show_calculation_method(p, result):
     row = max(result["rows"], key=lambda r: r[key])
     case = max(row["cases"], key=lambda r: r[key])
     c = method_case(p, result, row, case)
+    if beam_properties(p, c["beam"])["steel"]:
+        show_steel_case(p, result, row, case, c)
+        return
     st.pyplot(
         draw_beam_minimap(
             p, result["model"], row["name"]
@@ -1776,14 +1934,30 @@ def main():
         joist=choose_section("Dwarsbalkprofiel",(65,175),"joist")
         edge=choose_section("Randbalkprofiel",(75,175),"edge")
         header=choose_section("Lichtstraat ravelprofiel",(63,300),"header")
+        with st.expander("B1 · hout of staal", expanded=False):
+            b1_material = st.radio("Materiaal B1", ["Hout", "Staal"],
+                                   horizontal=True, key="b1_material")
+            b1_steel_profile = "HEB 160"
+            steel_deflection_denominator = 300
+            if b1_material == "Staal":
+                b1_steel_profile = st.selectbox(
+                    "Staalprofiel B1 · S235", list(STEEL_SECTIONS),
+                    index=list(STEEL_SECTIONS).index("HEB 160"), key="b1_steel_profile")
+                steel_deflection_denominator = st.selectbox(
+                    "Doorbuigingsgrens B1 · voorlopige projecteis", [250, 300, 400, 500],
+                    index=1, format_func=lambda n: f"L/{n}", key="steel_deflection_denominator")
+                st.caption("Deelcontrole: buiging en doorbuiging. Kip nog open. "
+                           "Het randbalkprofiel geldt voor de overige houten randbalken.")
         with st.expander("Lichtstraten · per stuk",expanded=True,):
             skylight_kg = st.number_input("Gewicht [kg]",min_value=0.0,value=80.0,step=1.0,key="skylight_kg",)
             skylight_inner_mm = st.number_input("Binnenmaat vierkant raam [mm]",min_value=100,value=1200,step=10,key="skylight_inner_mm",)
             skylight_outer_mm = st.number_input("Buitenmaat vierkant raam [mm]",min_value=100,value=1400,step=10, key="skylight_outer_mm",
             )
 
+            third_skylight = st.toggle("Lichtraam 3 tussen raam 1 en 2",
+                                       value=False, key="third_skylight")
             st.caption(
-                "Twee identieke ramen. Opstandopening = "
+                "Alle ramen hebben dezelfde maten en hetzelfde gewicht. Opstandopening = "
                 "binnenmaat + 10 mm. Hoogtetoets: 5 mm "
                 "dakbedekking + 100 mm isolatie + underlayment."
             )
@@ -1810,7 +1984,7 @@ def main():
             key="extra_column",
         )
 
-    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,skylight_edge_distance_mm=skylight_edge_distance_mm,)
+    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,skylight_edge_distance_mm=skylight_edge_distance_mm, third_skylight=third_skylight, b1_material=b1_material, b1_steel_profile=b1_steel_profile, steel_deflection_denominator=steel_deflection_denominator,)
     st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
@@ -1820,13 +1994,16 @@ def main():
     plot_col, info_col = st.columns([3,1])
     with plot_col:
         st.pyplot(draw_plan(p,result["model"]),width="stretch")
-    st.caption("Lichtbruin: dwarsbalken · oranje: randbalken en wissels · blauw: lichtstraten")
+    st.caption("Lichtbruin: dwarsbalken · oranje: houten randbalken en wissels · blauw: lichtstraten · grijs: stalen B1")
     a,b,c=st.columns([1,1,1.4])
     a.metric("UGT · buiging",f"{result['ugt']:.2f}")
     b.metric("BGT · einddoorbuiging",f"{result['bgt']:.2f}")
     status="VOLDOET" if result["passed"] else "VOLDOET NIET"
     (c.success if result["passed"] else c.error)(f"{status} — deelcontrole")
     st.caption("Een benutting ≤ 1,00 voldoet voor de berekende toets")
+    if p.b1_material == "Staal":
+        st.warning("Stalen B1: uitsluitend buiging en directe doorbuiging gecontroleerd. "
+                   "Kip, afschuiving/buiginteractie, verbindingen en opleggingen staan open.")
     worst_u=max(result["rows"],key=lambda r:r["ugt"])
     worst_b=max(result["rows"],key=lambda r:r["bgt"])
     st.caption(f"Bepalend UGT: {worst_u['name']} ({worst_u['ugt_case']}) · "
@@ -1850,7 +2027,7 @@ def main():
 
     if mode=="Optimalisatie":
         st.subheader("Goedgekeurde combinaties · deelcontrole")
-        st.caption("Zoekt dwarsbalkprofiel × maximale h.o.h.; randbalk- en ravelprofiel blijven zoals gekozen. "
+        st.caption("Zoekt dwarsbalkprofiel × maximale h.o.h.; randbalk-, B1- en ravelprofiel blijven zoals gekozen. "
                    "Alle berekende balken moeten voldoen. Gesorteerd op minimaal totaal houtvolume.")
         with st.spinner("Profielen en h.o.h.-afstanden controleren…"):
             approved=optimize(p)
