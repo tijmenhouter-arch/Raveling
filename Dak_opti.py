@@ -79,6 +79,7 @@ class Parameters:
     skylight_kg: float = 80.0
     skylight_inner_mm: int = 1200
     skylight_outer_mm: int = 1400
+    skylight_edge_distance_mm: int = 540
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -336,8 +337,6 @@ def point_envelope(length, support):
     # Kleine toeslag vanwege bemonstering van de lastpositie.
     return max_moment * 1.001, max_deflection * 1.001
 
-# Middelpunten uit de oorspronkelijke tekening blijven vast.
-SKYLIGHT_CENTRES_X = (1240.0, 4240.0)
 SKYLIGHT_CENTRE_Y = 1412.0
 
 CURB_CLEARANCE_MM = 10.0
@@ -373,12 +372,26 @@ def skylight_geometry(p):
             "binnen de glascontour, vóór isolatie en afwerking."
         )
 
-    xs = tuple(
-        cx - clear / 2 for cx in SKYLIGHT_CENTRES_X
+    distance = float(p.skylight_edge_distance_mm)
+
+    if distance < 0:
+        raise ValueError(
+            "De afstand tot de dakrand mag niet negatief zijn."
+        )
+
+    if 2 * (distance + outer) >= WIDTH:
+        raise ValueError(
+            "De lichtstraten moeten met tussenruimte "
+            "naast elkaar passen."
+        )
+
+    centres_x = (
+        distance + outer / 2,
+        WIDTH - distance - outer / 2,
     )
-    outer_xs = tuple(
-        cx - outer / 2 for cx in SKYLIGHT_CENTRES_X
-    )
+
+    xs = tuple(cx - clear / 2 for cx in centres_x)
+    outer_xs = tuple(cx - outer / 2 for cx in centres_x)
     y = SKYLIGHT_CENTRE_Y - clear / 2
     outer_y = SKYLIGHT_CENTRE_Y - outer / 2
 
@@ -783,7 +796,7 @@ def analyze(p, keep_details=True):
     volume += p.edge[0]*p.edge[1]*(WIDTH+2*DEPTH+EXT_DEPTH)/1e9
     geometry = skylight_geometry(p)
 
-    volume += (len(SKYLIGHT_CENTRES_X) * (4 * geometry["size"] + 4 * p.header[0]) * p.header[0] * p.header[1] / 1e9)
+    volume += (len(geometry["x"]) * (4 * geometry["size"] + 4 * p.header[0]) * p.header[0] * p.header[1] / 1e9)
 
     return dict(ugt=ugt,bgt=bgt, passed=(
             ugt <= 1
@@ -851,7 +864,7 @@ def draw_plan(p, model):
                             [OPEN_Y,OPEN_Y+OPEN_SIZE+200],color="white",alpha=.4,lw=18,zorder=6)
             line.set_clip_path(glass)
         ax.text(ox+OPEN_SIZE/2,OPEN_Y+OPEN_SIZE/2,
-                f"Lichtstraat {i}\nBinnen: {p.skylight_inner_mm} × {p.skylight_inner_mm}\n{p.skylight_kg:g} kg",
+                f"Lichtstraat {i}\n{p.skylight_inner_mm} × {p.skylight_inner_mm}\n{p.skylight_kg:g} kg",
                 ha="center",va="center",color=ink,fontsize=10,fontweight="bold",zorder=7)
     # Apart opstandframe bovenop de bestaande balklaag.
     for ox in OPEN_X:
@@ -1755,6 +1768,18 @@ def main():
                 "binnenmaat + 10 mm. Hoogtetoets: 5 mm "
                 "dakbedekking + 100 mm isolatie + underlayment."
             )
+            skylight_edge_distance_mm = st.number_input(
+                "Afstand dakrand tot buitenkant raam [mm]",
+                min_value=0,
+                value=540,
+                step=10,
+                key="skylight_edge_distance_mm",
+                help=(
+                    "Links en rechts dezelfde afstand, gemeten "
+                    "vanaf de buitenzijde van de randbalk tot "
+                    "de buitenmaat van het raam."
+                ),
+            )
         with st.expander("Variabele belastingen", expanded=False):
             snow = st.number_input("Sneeuw [kN/m²]", min_value=0.0, value=0.56, step=0.01, key="snow",)
             rain = st.number_input("Regenwater [kN/m²]", min_value=0.0,value=1.0,step=0.05,key="rain",)
@@ -1766,7 +1791,7 @@ def main():
             key="extra_column",
         )
 
-    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,)
+    p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,skylight_edge_distance_mm=skylight_edge_distance_mm,)
     st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
