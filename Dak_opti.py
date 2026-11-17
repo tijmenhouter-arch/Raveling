@@ -1028,10 +1028,10 @@ def draw_plan(p, model):
     )])
     for a,b in zip(chain,chain[1:]):
         dim(a,b,-290,fs=9)
-    dim(0,WIDTH,-580,label="5.480 mm",fs=12)
+    dim(0,WIDTH,-640,label="5.480 mm",fs=12)
     for a,b in [(0, OPEN_Y),(OPEN_Y, OPEN_Y+OPEN_DEPTH),(OPEN_Y+OPEN_DEPTH, DEPTH),]:
         dim(a,b,-300,True,fs=9)
-    dim(0,DEPTH,-610,True,label="2.824 mm",fs=12)
+    dim(0,DEPTH,-610,True,label="2.848 mm",fs=12)
     dim(EXT_X,WIDTH,DEPTH+EXT_DEPTH+360,label="2.455 mm",fs=12)
     dim(DEPTH,DEPTH+EXT_DEPTH,EXT_X-430,True,label="1.220 mm")
     dim(0,DEPTH+EXT_DEPTH,WIDTH+430,True,label="4.044 mm",fs=12)
