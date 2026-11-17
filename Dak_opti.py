@@ -1823,7 +1823,7 @@ def choose_section(label, default, key):
 def main():
     st.set_page_config(page_title="Optimalisatie raveling Schinkel",layout="wide")
     with st.sidebar:
-        mode = st.select_slider("Rekenmodus",["Controle", "Optimalisatie"],value="Controle",key="mode",)
+        mode = st.radio("Rekenmodus",["Controle", "Optimalisatie"],value="Controle",key="mode",)
         st.header("Ontwerpparameters")
         strength=st.selectbox("Sterkteklasse vurenhout",list(MATERIALS),key="strength")
         sheet=st.selectbox("Underlayment",[18,22],format_func=lambda x:f"{x} mm",key="sheet")
