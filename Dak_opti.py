@@ -910,7 +910,6 @@ def optimize(p):
 def draw_plan(p, model):
     geometry = skylight_geometry(p)
     OPEN_SIZE, OPEN_DEPTH, OPEN_X, OPEN_Y = (geometry["size_x"], geometry["size_y"], geometry["x"], geometry["y"])
-    """Binnengeometrie leidend; randbalkdiktes schematisch aan de buitenzijde."""
     fig = Figure(figsize=(12, 8), layout="constrained", facecolor="white")
     ax = fig.subplots()
     orange, dark, pale = "#ec920f", "#9c570d", "#ffe2a8"
@@ -1038,7 +1037,7 @@ def draw_plan(p, model):
     if p.extra_column:
         ax.scatter([p.column_x - ew / 2],[DEPTH + ew/2],s=110,color=ink,zorder=12,)
         ax.annotate("Extra kolom",(p.column_x - ew / 2, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
-    ax.set_title("Raveling dak — plattegrond (bovenaanzicht)",loc="left",
+    ax.set_title("Aanbouw dak — plattegrond (bovenaanzicht)",loc="left",
                  fontsize=16,fontweight="bold",color=ink,pad=20)
     ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · opstandframes bovenop balklaag",
             fontsize=9,color=ink)
@@ -1821,7 +1820,7 @@ def choose_section(label, default, key):
 
 
 def main():
-    st.set_page_config(page_title="Optimalisatie raveling Schinkel",layout="wide")
+    st.set_page_config(page_title="Optimalisatie aanbouwdak Schinkel",layout="wide")
     with st.sidebar:
         mode = st.radio("Rekenmodus",["Controle", "Optimalisatie"],index=0,key="mode",)
         st.header("Ontwerpparameters")
@@ -1898,7 +1897,7 @@ def main():
         skylight_type=skylight_type, skylight_inner_x_mm=skylight_inner_x_mm,
         skylight_inner_y_mm=skylight_inner_y_mm, skylight_outer_x_mm=skylight_outer_x_mm,
         skylight_outer_y_mm=skylight_outer_y_mm,)
-    st.title("Optimalisatie raveling Schinkel")
+    st.title("Optimalisatie Dak Schinkel")
     try:
         result=analyze(p)
     except (ValueError, ArithmeticError) as exc:
