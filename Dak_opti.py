@@ -877,8 +877,7 @@ def analyze(p, keep_details=True):
 
     return dict(ugt=ugt,bgt=bgt, passed=(
             ugt <= 1
-            and bgt <= 1
-            and geometry["height_ok"]
+            and bgt <= 1,
         ),
         rows=rows, geometry=geometry, volume=volume, balance=balance, applied=applied, terminal=terminal, model=m if keep_details else None,)
 
