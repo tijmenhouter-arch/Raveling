@@ -346,7 +346,7 @@ def point_envelope(length, support):
     # Kleine toeslag vanwege bemonstering van de lastpositie.
     return max_moment * 1.001, max_deflection * 1.001
 
-SKYLIGHT_CENTRE_Y = 1412.0
+SKYLIGHT_CENTRE_Y = 1424.0
 
 CURB_CLEARANCE_MM = 10.0
 CURB_MIN_ABOVE_ROOF_MM = 150.0
