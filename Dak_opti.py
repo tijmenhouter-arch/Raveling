@@ -1027,8 +1027,8 @@ def draw_plan(p, model):
         value for ox in OPEN_X for value in (ox, ox + OPEN_SIZE)
     )])
     for a,b in zip(chain,chain[1:]):
-        dim(a,b,-290,fs=9)
-    dim(0,WIDTH,-640,label="5.480 mm",fs=12)
+        dim(a,b,-320,fs=9)
+    dim(0,WIDTH,-600,label="5.480 mm",fs=12)
     for a,b in [(0, OPEN_Y),(OPEN_Y, OPEN_Y+OPEN_DEPTH),(OPEN_Y+OPEN_DEPTH, DEPTH),]:
         dim(a,b,-300,True,fs=9)
     dim(0,DEPTH,-610,True,label="2.848 mm",fs=12)
