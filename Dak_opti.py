@@ -48,7 +48,7 @@ POINT_LOAD_N = 1500.0
 CASES = ("Permanent", *AREA_LOADS)
 SECTIONS = (
     (45, 145), (45, 170), (45, 195), (45, 220),
-    (63, 145), (63, 170), (63, 195), (63, 220), (63, 245), (65, 175), (75, 175),
+    (63, 145), (63, 170), (63, 195), (63, 220), (63, 245), (65, 175), (70, 170), (75, 175),
     (75, 195), (75, 220), (75, 245), (75, 270),
     (100, 220), (100, 245), (100, 270),
 )
@@ -1849,8 +1849,8 @@ def main():
         strength=st.selectbox("Sterkteklasse vurenhout",list(MATERIALS),key="strength")
         sheet=st.selectbox("Underlayment",[18,22],format_func=lambda x:f"{x} mm",key="sheet")
         spacing=st.slider("Maximale h.o.h. dwarsbalken [mm]",300,750,600,25,key="spacing")
-        joist=choose_section("Dwarsbalkprofiel",(65,175),"joist")
-        edge=choose_section("Randbalkprofiel",(75,175),"edge")
+        joist=choose_section("Dwarsbalkprofiel",(70,170),"joist")
+        edge=choose_section("Randbalkprofiel",(70,170),"edge")
         header=choose_section("Lichtstraat ravelprofiel",(63,300),"header")
         with st.expander("B1 · hout of staal", expanded=False):
             b1_material = st.radio("Materiaal B1", ["Hout", "Staal"],
@@ -1867,7 +1867,7 @@ def main():
                 st.caption("Deelcontrole: buiging en doorbuiging. Kip nog open. "
                            "Het randbalkprofiel geldt voor de overige houten randbalken.")
         with st.expander("Lichtstraten", expanded=True):
-            skylight_type = st.selectbox("Type lichtstraat", ["Vierkant", "Rechthoek"],
+            skylight_type = st.selectbox("Type lichtstraat", ["Rechthoek", "Vierkant"],
                                          key="skylight_type")
             skylight_inner_x_mm, skylight_inner_y_mm = 3000, 1000
             skylight_outer_x_mm, skylight_outer_y_mm = 3200, 1200
@@ -1911,7 +1911,7 @@ def main():
             maintenance_point = st.number_input("Onderhoud puntlast [kN]",min_value=0.0,value=1.5,step=0.1,key="maintenance_point",)
         extra_column = st.toggle(
             "Extra kolom onder aansluiting B1–B3",
-            value=False,
+            value=True,
             key="extra_column",
         )
 
