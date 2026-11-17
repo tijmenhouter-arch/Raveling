@@ -39,7 +39,7 @@ from matplotlib.patches import Rectangle
 
 # ==================== PROJECTUITGANGSPUNTEN ====================
 # Bewust vaste uitgangspunten: de interface bevat alleen ontwerpparameters.
-WIDTH, DEPTH = 5480.0, 2836.0
+WIDTH, DEPTH = 5480.0, 2824.0
 EXT_WIDTH, EXT_DEPTH = 2455.0, 1220.0
 EXT_X = WIDTH - EXT_WIDTH
 ROOF_DEAD, CEILING_DEAD, DENSITY = 0.15, 0.15, 500.0
