@@ -1399,7 +1399,7 @@ def show_calculation_method(p, result):
         "bevestigingen zijn nog niet gecontroleerd."
     )
 
-    st.markdown("### Maatvoering en hoogte opstand")
+    st.markdown("### Maatvoering opstand")
 
     st.write(
         f"Aantal ramen: {len(geometry['x'])}. "
@@ -1425,26 +1425,6 @@ def show_calculation_method(p, result):
         "volledige buitenmaat van beide ramen uitgesloten."
     )
 
-    st.latex(
-        rf"h_{{vrij}}={p.header[1]}"
-        rf"-{ROOF_COVER_MM:g}"
-        rf"-{INSULATION_MM:g}"
-        rf"-{p.sheet}"
-        rf"={geometry['above_roof']:g}\;\mathrm{{mm}}"
-    )
-
-    st.write(
-        "Vereist minimaal 150 mm boven afgewerkt dak. "
-        f"Benodigde profielhoogte: "
-        f"{geometry['minimum_height']:g} mm. "
-        "Dakbedekking 5 mm en isolatie 100 mm zijn "
-        "rekenaannames voor deze hoogtetoets. "
-        "De permanente vlaklast blijft zoals ingevoerd. "
-        "Helling blijft op verzoek buiten het model. "
-        "Isolatie en afwerking in de opstandbreedte, "
-        "steunlatten en bevestigingen zijn nog "
-        "niet gedetailleerd."
-    )
     st.markdown("### 2. Casus: de maatgevende balk")
     choice = st.selectbox(
         "Casus",
@@ -1943,20 +1923,6 @@ def main():
                f"Bepalend BGT: {worst_b['name']} ({worst_b['bgt_case']})")
     #st.info("Deelcontrole van buiging en einddoorbuiging per balk. Verbindingen, afschuiving, "
             #"stabiliteit en doorbuiging van de totale gekoppelde dakconstructie zijn nog niet getoetst.")
-    geometry = result["geometry"]
-
-    st.caption(
-        "Vrije opstandhoogte boven afgewerkt dak: "
-        f"{geometry['above_roof']:g} mm; "
-        "vereist minimaal 150 mm."
-    )
-
-    if not geometry["height_ok"]:
-        st.error(
-            "Opstandprofiel te laag. "
-            f"Minimaal {geometry['minimum_height']:g} mm "
-            "profielhoogte nodig bij de aangenomen dakopbouw."
-        )
 
     if mode=="Optimalisatie":
         st.subheader("Goedgekeurde combinaties · deelcontrole")
