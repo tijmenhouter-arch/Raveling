@@ -39,7 +39,7 @@ from matplotlib.patches import Rectangle
 
 # ==================== PROJECTUITGANGSPUNTEN ====================
 # Bewust vaste uitgangspunten: de interface bevat alleen ontwerpparameters.
-WIDTH, DEPTH = 5480.0, 2848.0
+WIDTH, DEPTH = 5480.0, 2824.0
 EXT_WIDTH, EXT_DEPTH = 2455.0, 1220.0
 EXT_X = WIDTH - EXT_WIDTH
 ROOF_DEAD, CEILING_DEAD, DENSITY = 0.15, 0.15, 500.0
@@ -65,8 +65,8 @@ class Parameters:
     strength: str = "C24"
     sheet: int = 18
     spacing: int = 600
-    joist: tuple[int, int] = (63, 195)
-    edge: tuple[int, int] = (75, 245)
+    joist: tuple[int, int] = (170, 170)
+    edge: tuple[int, int] = (170, 170)
     header: tuple[int, int] = (63, 300)
     bearing_left: int = 120
     bearing_right: int = 120
@@ -89,6 +89,8 @@ class Parameters:
     b1_material: str = "Hout"
     b1_steel_profile: str = "HEB 160"
     steel_deflection_denominator: int = 300
+    b1_section: tuple[int, int] = (95, 295)  # breedte, hoogte [mm]
+    masonry_load: bool = False  # 2 kN/m permanent, alleen links van B3
 
 
 # Belasting: ('q', begin, eind, N/mm) of ('P', positie, positie, N).
@@ -346,7 +348,7 @@ def point_envelope(length, support):
     # Kleine toeslag vanwege bemonstering van de lastpositie.
     return max_moment * 1.001, max_deflection * 1.001
 
-SKYLIGHT_CENTRE_Y = 1424.0
+SKYLIGHT_CENTRE_Y = 1412.0
 
 CURB_CLEARANCE_MM = 10.0
 CURB_MIN_ABOVE_ROOF_MM = 150.0
@@ -378,19 +380,25 @@ STEEL_SECTIONS = {
 
 
 def beam_properties(p, beam):
+    masonry_b1 = beam.name == "B1" and p.masonry_load
+    limit_ratio = (1/500 if masonry_b1 else
+                   1/p.steel_deflection_denominator
+                   if beam.name == "B1" and p.b1_material == "Staal"
+                   else PROFILE["limit_ratio"])
     if beam.name == "B1" and p.b1_material == "Staal":
         s = STEEL_SECTIONS[p.b1_steel_profile]
         return dict(**s, E=210000.0, fm=235.0, gamma_m=1.0,
                     kmod_g=1.0, kmod_q=1.0, kdef=0.0,
-                    limit_ratio=1/p.steel_deflection_denominator,
+                    limit_ratio=limit_ratio,
                     label=p.b1_steel_profile, material="S235", steel=True)
     b, h = beam.section
     mat = MATERIALS[p.strength]
     return dict(A=b*h, I=b*h**3/12, W=b*h*h/6, E=mat["E"], fm=mat["fm"],
                 gamma_m=PROFILE["gamma_m"], kmod_g=PROFILE["kmod_g"],
                 kmod_q=PROFILE["kmod_q"], kdef=PROFILE["kdef"],
-                limit_ratio=PROFILE["limit_ratio"], label=section_text(beam.section),
+                limit_ratio=limit_ratio, label=section_text(beam.section),
                 material=p.strength, steel=False)
+
 
 
 def show_steel_case(p, result, row, case, c):
@@ -470,7 +478,7 @@ def show_steel_case(p, result, row, case, c):
         st.latex(r"u_{envelop}=\max|u_G|+P_k\max|u_{P=1N}|")
     st.write(f"Doorbuiging: **{c['u']:.3f} mm**. "
              f"Grens: **{row['limit']:.3f} mm** "
-             f"(L/{p.steel_deflection_denominator}; "
+             f"(L/{1/props['limit_ratio']:g}; "
              "bij een extra kolom wordt conservatief het kortste veld gebruikt).")
     st.latex(rf"\eta_{{BGT}}=\frac{{{c['u']:.3f}}}{{{row['limit']:.3f}}}={c['bgt']:.3f}")
     st.caption("De doorbuigingsgrens is een voorlopige projecteis, geen automatische "
@@ -597,7 +605,10 @@ def build_model(p):
         add_q(beam, "Permanent", own_weight)
         return beam
 
-    B1 = member("B1", "Randbalk", p.edge, WIDTH+left_offset+right_offset)
+    B1 = member("B1", "Randbalk", p.b1_section, WIDTH+left_offset+right_offset)
+    if p.masonry_load:
+        # 2 kN/m = 2 N/mm. Modelas begint een halve oplegging links van de muur.
+        add_q(B1, "Permanent", 2.0, left_offset, EXT_X+left_offset)
     B2 = member("B2", "Randbalk", p.edge, EXT_WIDTH+left_offset+right_offset)
     B3 = member("B3", "Randbalk", p.edge, EXT_DEPTH+left_offset,
                 (("B1", EXT_X+left_offset), None))
@@ -883,17 +894,16 @@ def analyze(p, keep_details=True):
 
 @st.cache_data(show_spinner=False, max_entries=12)
 def optimize(p):
-    """Discrete zoekactie: dwarsbalkprofiel × maximale h.o.h.
-@st.cache_data
-    Randbalk- en ravelprofiel blijven zoals in de zijbalk gekozen. Alle in het
-    model berekende balken moeten slagen voor de twee geïmplementeerde toetsen.
+   """Zoek gezamenlijk rand-/dwarsbalkprofiel × maximale h.o.h.
+    B1 en ravelprofiel blijven vast; metselwerklast blijft meegenomen.
+    Alle berekende balken moeten voldoen aan de geïmplementeerde toetsen.
     """
     approved = []
     candidates = tuple(dict.fromkeys((*SECTIONS, p.joist)))
 
     for section in candidates:
         for spacing in SPACINGS:
-            trial = replace(p, joist=section, spacing=spacing)
+            trial = replace(p, joist=section, edge=section, spacing=spacing)
             try:
                 skylight_geometry(trial)
             except ValueError:
@@ -910,6 +920,7 @@ def optimize(p):
 def draw_plan(p, model):
     geometry = skylight_geometry(p)
     OPEN_SIZE, OPEN_DEPTH, OPEN_X, OPEN_Y = (geometry["size_x"], geometry["size_y"], geometry["x"], geometry["y"])
+    """Binnengeometrie leidend; randbalkdiktes schematisch aan de buitenzijde."""
     fig = Figure(figsize=(12, 8), layout="constrained", facecolor="white")
     ax = fig.subplots()
     orange, dark, pale = "#ec920f", "#9c570d", "#ffe2a8"
@@ -990,12 +1001,14 @@ def draw_plan(p, model):
     timber(-ew,-ew,WIDTH+2*ew,ew,orange,z=8)
     timber(-ew,0,ew,DEPTH,orange,z=8)
     timber(WIDTH,0,ew,DEPTH+EXT_DEPTH+ew,orange,z=8)
+    b1_width = (STEEL_SECTIONS[p.b1_steel_profile]["b"]
+                if p.b1_material == "Staal" else p.b1_section[0])
     if p.b1_material == "Staal":
-        steel_b = STEEL_SECTIONS[p.b1_steel_profile]["b"]
-        timber(0, DEPTH+ew/2-steel_b/2, WIDTH, steel_b,
+        timber(0, DEPTH, WIDTH, b1_width,
                color="#697f92", edge="#354958", z=8)
     else:
-        timber(0,DEPTH,WIDTH,ew,orange,z=8)
+        timber(0,DEPTH,WIDTH,b1_width,orange,z=8)
+    timber(EXT_X-ew,DEPTH+b1_width,ew,EXT_DEPTH-b1_width,orange,z=8)
     timber(EXT_X-ew,DEPTH+ew,ew,EXT_DEPTH-ew,orange,z=8)
     timber(EXT_X,DEPTH+EXT_DEPTH,EXT_WIDTH,ew,orange,z=8)
     # Ondersteuningen: muur langs onder/links/rechts, kolom bij opbouw.
@@ -1005,7 +1018,7 @@ def draw_plan(p, model):
     ax.scatter([EXT_X-ew/2],[DEPTH+EXT_DEPTH],s=55,color=ink,zorder=9)
     ax.annotate("Kolom",(EXT_X-ew/2,DEPTH+EXT_DEPTH),xytext=(-12,14),
                 textcoords="offset points",ha="right",fontsize=9,color=ink)
-    ax.text(WIDTH*.38,DEPTH+ew+55,
+    ax.text(WIDTH*.38,DEPTH+b1_width+55,
             "B1 · " + p.b1_steel_profile if p.b1_material == "Staal" else "B1",ha="center",fontsize=10,color=ink)
     ax.text(EXT_X+EXT_WIDTH*.5,DEPTH+EXT_DEPTH+ew+55,"B2",ha="center",fontsize=10,color=ink)
     ax.text(EXT_X-ew-65,DEPTH+EXT_DEPTH*.5,"B3",ha="right",fontsize=10,color=ink)
@@ -1026,18 +1039,18 @@ def draw_plan(p, model):
         value for ox in OPEN_X for value in (ox, ox + OPEN_SIZE)
     )])
     for a,b in zip(chain,chain[1:]):
-        dim(a,b,-320,fs=9)
-    dim(0,WIDTH,-600,label="5.480 mm",fs=12)
+        dim(a,b,-290,fs=9)
+    dim(0,WIDTH,-580,label="5.480 mm",fs=12)
     for a,b in [(0, OPEN_Y),(OPEN_Y, OPEN_Y+OPEN_DEPTH),(OPEN_Y+OPEN_DEPTH, DEPTH),]:
         dim(a,b,-300,True,fs=9)
-    dim(0,DEPTH,-610,True,label="2.848 mm",fs=12)
+    dim(0,DEPTH,-610,True,label="2.824 mm",fs=12)
     dim(EXT_X,WIDTH,DEPTH+EXT_DEPTH+360,label="2.455 mm",fs=12)
     dim(DEPTH,DEPTH+EXT_DEPTH,EXT_X-430,True,label="1.220 mm")
     dim(0,DEPTH+EXT_DEPTH,WIDTH+430,True,label="4.044 mm",fs=12)
     if p.extra_column:
-        ax.scatter([p.column_x - ew / 2],[DEPTH + ew/2],s=110,color=ink,zorder=12,)
-        ax.annotate("Extra kolom",(p.column_x - ew / 2, DEPTH + ew/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
-    ax.set_title("Aanbouw dak — plattegrond (bovenaanzicht)",loc="left",
+        ax.scatter([p.column_x - ew / 2],[DEPTH + b1_width/2],s=110,color=ink,zorder=12,)
+        ax.annotate("Extra kolom",(p.column_x - ew / 2, DEPTH + b1_width/2),xytext=(-14, -22),textcoords="offset points",ha="right",fontsize=9,color=ink,)
+    ax.set_title("Raveling dak — plattegrond (bovenaanzicht)",loc="left",
                  fontsize=16,fontweight="bold",color=ink,pad=20)
     ax.text(0,-840,"Binnenmaten in mm · balkdiktes schematisch · opstandframes bovenop balklaag",
             fontsize=9,color=ink)
@@ -1301,6 +1314,18 @@ def show_calculation_method(p, result):
         "onderaan op B1; staat daar de extra kolom, dan vangt "
         "die deze reactie rechtstreeks op."
     )
+
+    b1_label = (p.b1_steel_profile if p.b1_material == "Staal"
+                else section_text(p.b1_section) + " (breedte × hoogte)")
+    st.write(f"B1: {b1_label}. "
+             f"Overige rand- en dwarsbalken: {section_text(p.joist)}.")
+    if p.masonry_load:
+        st.info("Metselwerk op B1: permanente lijnlast 2,00 kN/m over 3,025 m, "
+                "vanaf de linker muur tot B3, exclusief muuroplegging. "
+                "Totaal Gk = 6,05 kN. In de lokale B1-coördinaten loopt deze last "
+                f"van {p.bearing_left/2:g} tot {EXT_X+p.bearing_left/2:g} mm. "
+                "De last telt mee in beide UGT-combinaties en in de "
+                "permanente BGT-doorbuiging, inclusief houtkruip bij een houten B1.")
 
     sheet_dead = {18: 0.10, 22: 0.12}[p.sheet]
     roof = ROOF_DEAD + sheet_dead + CEILING_DEAD
@@ -1691,7 +1716,7 @@ def show_calculation_method(p, result):
         f"Grens: **{row['limit']:.4f} mm**."
     )
     st.latex(
-        rf"u_{{lim}}=0.004L_{{ref}}"
+        rf"u_{{lim}}=\frac{{L_{{ref}}}}{{{1/beam_properties(p, c['beam'])['limit_ratio']:g}}}"
         rf"={row['limit']:.4f}\;\mathrm{{mm}},"
         rf"\qquad\eta_{{BGT}}="
         rf"\frac{{u_{{fin}}}}{{u_{{lim}}}}"
@@ -1820,21 +1845,27 @@ def choose_section(label, default, key):
 
 
 def main():
-    st.set_page_config(page_title="Optimalisatie aanbouwdak Schinkel",layout="wide")
+    st.set_page_config(page_title="Optimalisatie raveling Schinkel",layout="wide")
     with st.sidebar:
-        mode = st.radio("Rekenmodus",["Controle", "Optimalisatie"],index=0,key="mode",)
+        mode = st.select_slider("Rekenmodus",["Controle", "Optimalisatie"],value="Controle",key="mode",)
         st.header("Ontwerpparameters")
         strength=st.selectbox("Sterkteklasse vurenhout",list(MATERIALS),key="strength")
         sheet=st.selectbox("Underlayment",[18,22],format_func=lambda x:f"{x} mm",key="sheet")
         spacing=st.slider("Maximale h.o.h. dwarsbalken [mm]",300,750,600,25,key="spacing")
-        joist=choose_section("Dwarsbalkprofiel",(70,170),"joist")
-        edge=choose_section("Randbalkprofiel",(70,170),"edge")
+        common=choose_section("Rand- en dwarsbalkprofiel (excl. B1)",(170,170),"common")
+        joist=edge=common
         header=choose_section("Lichtstraat ravelprofiel",(63,300),"header")
         with st.expander("B1 · hout of staal", expanded=False):
             b1_material = st.radio("Materiaal B1", ["Hout", "Staal"],
                                    horizontal=True, key="b1_material")
+            b1_section = (95, 295)
             b1_steel_profile = "HEB 160"
             steel_deflection_denominator = 300
+            if b1_material == "Hout":
+                b1_section = choose_section("Houten profiel B1", (95,295), "b1_wood")
+            masonry_load = st.toggle("Metselwerk op B1 · 2 kN/m", value=False, key="masonry_load")
+            st.caption("Indien ingeschakeld: permanent 6,05 kN over de linker 3.025 mm tot B3. "
+                       "B1 wordt dan op de totale einddoorbuiging getoetst met L/500, ook bij staal.")
             if b1_material == "Staal":
                 b1_steel_profile = st.selectbox(
                     "Staalprofiel B1 · S235", list(STEEL_SECTIONS),
@@ -1896,8 +1927,8 @@ def main():
     p=Parameters(strength,sheet,spacing,joist,edge,header, extra_column=extra_column, snow=snow,rain=rain,maintenance_area=maintenance_area,maintenance_point=maintenance_point, skylight_kg=skylight_kg, skylight_inner_mm=skylight_inner_mm, skylight_outer_mm=skylight_outer_mm,skylight_edge_distance_mm=skylight_edge_distance_mm, third_skylight=third_skylight, b1_material=b1_material, b1_steel_profile=b1_steel_profile, steel_deflection_denominator=steel_deflection_denominator,
         skylight_type=skylight_type, skylight_inner_x_mm=skylight_inner_x_mm,
         skylight_inner_y_mm=skylight_inner_y_mm, skylight_outer_x_mm=skylight_outer_x_mm,
-        skylight_outer_y_mm=skylight_outer_y_mm,)
-    st.title("Optimalisatie Dak Schinkel")
+        skylight_outer_y_mm=skylight_outer_y_mm, b1_section=b1_section, masonry_load=masonry_load,)
+    st.title("Optimalisatie raveling Schinkel")
     try:
         result=analyze(p)
     except (ValueError, ArithmeticError) as exc:
@@ -1925,14 +1956,14 @@ def main():
 
     if mode=="Optimalisatie":
         st.subheader("Goedgekeurde combinaties · deelcontrole")
-        st.caption("Zoekt dwarsbalkprofiel × maximale h.o.h.; randbalk-, B1- en ravelprofiel blijven zoals gekozen. "
+        st.caption("Zoekt gezamenlijk rand-/dwarsbalkprofiel × maximale h.o.h.; B1 en ravelprofiel blijven zoals gekozen. "
                    "Alle berekende balken moeten voldoen. Gesorteerd op minimaal totaal houtvolume.")
         with st.spinner("Profielen en h.o.h.-afstanden controleren…"):
             approved=optimize(p)
         if not approved:
-            st.warning("Geen combinatie voldoet binnen deze zoeklijst. Controleer ook het gekozen randbalk- en ravelprofiel.")
+            st.warning("Geen combinatie voldoet binnen deze zoeklijst. Controleer ook het gekozen B1- en ravelprofiel.")
         else:
-            table=pd.DataFrame([{"Dwarsbalkprofiel":section_text(r["section"]),"Max. h.o.h. [mm]":r["spacing"],
+            table=pd.DataFrame([{"Rand-/dwarsbalkprofiel":section_text(r["section"]),"Max. h.o.h. [mm]":r["spacing"],
                                  "UGT":r["ugt"],"BGT":r["bgt"],"Houtvolume [m³]":r["volume"]}
                                 for r in approved])
             st.dataframe(table,hide_index=True,width="stretch",
