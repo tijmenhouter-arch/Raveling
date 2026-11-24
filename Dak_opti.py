@@ -894,7 +894,7 @@ def analyze(p, keep_details=True):
 
 @st.cache_data(show_spinner=False, max_entries=12)
 def optimize(p):
-   """Zoek gezamenlijk rand-/dwarsbalkprofiel × maximale h.o.h.
+    """Zoek gezamenlijk rand-/dwarsbalkprofiel × maximale h.o.h.
     B1 en ravelprofiel blijven vast; metselwerklast blijft meegenomen.
     Alle berekende balken moeten voldoen aan de geïmplementeerde toetsen.
     """
